@@ -1,0 +1,17 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "duplex-tools"
+version = "0.1.0"
+description = "Model independent asynchronous tools for duplex speech sessions"
+requires-python = ">=3.11"
+dependencies = []
+
+[project.optional-dependencies]
+granite = ["torch", "transformers>=4.54", "accelerate"]
+voice = ["gradio>=5", "soundfile", "numpy", "faster-whisper"]
+
+[tool.setuptools.packages.find]
+where = ["src"]

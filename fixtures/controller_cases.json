@@ -1,0 +1,75 @@
+[
+  {
+    "id": "local_room_lookup",
+    "request_id": "room-1",
+    "policy": "next_unit",
+    "local_records": {
+      "degree-project-room": "The assigned room is B742."
+    },
+    "calls": [
+      {
+        "tool": "local_lookup",
+        "arguments": {
+          "key": "degree-project-room",
+          "delay_s": 0.02
+        }
+      }
+    ],
+    "boundary": "unit",
+    "expected": "The assigned room is B742."
+  },
+  {
+    "id": "correction_rejects_old_result",
+    "request_id": "weather-1",
+    "policy": "next_unit",
+    "search_records": {
+      "weather Stockholm": {
+        "facts": "Stockholm: 14 degrees.",
+        "sources": ["fixture://weather/stockholm"]
+      },
+      "weather Uppsala": {
+        "facts": "Uppsala: 12 degrees.",
+        "sources": ["fixture://weather/uppsala"]
+      }
+    },
+    "calls": [
+      {
+        "tool": "fixture_search",
+        "arguments": {
+          "query": "weather Stockholm",
+          "delay_s": 0.06
+        },
+        "submit_after_s": 0.01
+      },
+      {
+        "tool": "fixture_search",
+        "arguments": {
+          "query": "weather Uppsala",
+          "delay_s": 0.01
+        }
+      }
+    ],
+    "boundary": "unit",
+    "expected": "Uppsala: 12 degrees."
+  },
+  {
+    "id": "cancel_discards_late_result",
+    "request_id": "inventory-1",
+    "policy": "next_listening",
+    "local_records": {
+      "headsets": "There are 7 headsets in stock."
+    },
+    "calls": [
+      {
+        "tool": "local_lookup",
+        "arguments": {
+          "key": "headsets",
+          "delay_s": 0.02
+        }
+      }
+    ],
+    "cancel": true,
+    "boundary": "listening",
+    "expected": null
+  }
+]

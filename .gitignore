@@ -1,0 +1,12 @@
+__pycache__/
+*.py[cod]
+.ipynb_checkpoints/
+.venv/
+build/
+dist/
+*.egg-info/
+outputs/
+models/
+*.gguf
+*.wav
+*.jsonl

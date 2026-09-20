@@ -1,0 +1,8 @@
+[
+  {"id":"room", "text":"Where is the robotics seminar?", "kind":"call", "tool":"room_lookup", "arguments":{"name":"robotics seminar"}},
+  {"id":"calculator", "text":"What is 17 times 23?", "kind":"call", "tool":"calculator", "arguments":{"expression":"17 * 23"}},
+  {"id":"document", "text":"Search the local documents for the thesis deadline.", "kind":"call", "tool":"document_search", "arguments":{"query":"thesis deadline"}},
+  {"id":"none", "text":"Thank you, that helps.", "kind":"none"},
+  {"id":"incomplete", "text":"What room is the", "kind":"none"},
+  {"id":"clarify", "text":"Find the room for my seminar.", "kind":"clarify"}
+]
