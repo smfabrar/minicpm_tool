@@ -35,7 +35,7 @@ from pathlib import Path
 import subprocess, sys
 
 ROOT = Path('/kaggle/working/minicpm_tool')
-SOURCE_REF = 'v0.1.3'
+SOURCE_REF = 'v0.1.4'
 if not ROOT.exists():
     subprocess.run(['git', 'clone', '--depth', '1', '--branch', SOURCE_REF,
                     'https://github.com/smfabrar/minicpm_tool.git', str(ROOT)], check=True)
@@ -81,12 +81,16 @@ code("""# 4 — CPU only: load Granite once and measure real caller proposals.
 # Kaggle normally has PyTorch. This installs only the model-side packages.
 subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'transformers>=4.54,<5', 'accelerate'], check=True)
 import json, time
+import importlib
 from datetime import datetime, timezone
+import duplex_tools.caller as caller_module
+importlib.reload(caller_module)
 from duplex_tools.caller import GraniteToolCaller, TransformersGraniteGenerator
 from duplex_tools.contracts import TranscriptSegment
-from duplex_tools.tools import TOOL_SCHEMAS
+from duplex_tools.tools import TOOL_SCHEMAS, validate_call
 
-generator = TransformersGraniteGenerator(device='cpu')
+if 'generator' not in globals():
+    generator = TransformersGraniteGenerator(device='cpu')
 caller = GraniteToolCaller(generator)
 cases = json.loads((ROOT / 'fixtures' / 'caller_cases.json').read_text())
 rows = []
@@ -94,12 +98,23 @@ for case in cases:
     segment = TranscriptSegment(case['id'], 1, datetime.now(timezone.utc), case['text'], True)
     start = time.perf_counter()
     action = await caller.decide(segment, {}, TOOL_SCHEMAS)
+    expected_tool = case.get('tool')
+    expected_args = case.get('arguments', {})
+    try:
+        parsed_args = validate_call(action.tool or '', action.arguments) if action.kind == 'call' else {}
+    except ValueError:
+        parsed_args = {}
+    args_match = parsed_args == expected_args or (
+        case['id'] == 'calculator' and parsed_args.get('expression', '').replace(' ', '') == expected_args.get('expression', '').replace(' ', '')
+    )
+    passed = action.kind == case['kind'] and (expected_tool is None or action.tool == expected_tool) and (expected_tool is None or args_match)
     rows.append({'id': case['id'], 'expected': case['kind'], 'actual': action.kind,
                  'tool': action.tool, 'arguments': dict(action.arguments),
-                 'latency_s': round(time.perf_counter() - start, 2), 'raw': action.raw})
+                 'passed': passed, 'latency_s': round(time.perf_counter() - start, 2), 'raw': action.raw})
 for row in rows:
     print(json.dumps(row, ensure_ascii=False))
-print('Action accuracy:', sum(r['expected'] == r['actual'] for r in rows), '/', len(rows))
+print('Fully correct:', sum(r['passed'] for r in rows), '/', len(rows))
+print('CPU gate:', 'PASS' if all(r['passed'] for r in rows) else 'FAIL — keep GPU off and review caller errors')
 """)
 
 code("""# 5 — CPU only: edit this sentence for a quick human-written transcript probe.
@@ -112,7 +127,7 @@ print('Raw model output:', proposal.raw)
 
 md("""## Stop here and enable the GPU
 
-In Kaggle Settings select **Accelerator → GPU**. Kaggle restarts the runtime. Rerun **cell 1 only**, then continue below. Phase B needs CUDA for MiniCPM. The 350M caller and tiny speech recognizer stay on CPU so the GPU is reserved for MiniCPM. If the GPU has too little memory, reduce `N_GPU_LAYERS` in the server cell and note the resulting latency.
+Proceed only when the CPU caller cell reports **PASS**. In Kaggle Settings select **Accelerator → GPU**. Kaggle restarts the runtime. Rerun **cell 1 only**, then continue below. Phase B needs CUDA for MiniCPM. The 350M caller and tiny speech recognizer stay on CPU so the GPU is reserved for MiniCPM. If the GPU has too little memory, reduce `N_GPU_LAYERS` in the server cell and note the resulting latency.
 """)
 
 code("""# 6 — GPU phase: verify the accelerator and install only the voice dependencies.
