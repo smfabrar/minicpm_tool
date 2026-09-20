@@ -35,7 +35,7 @@ from pathlib import Path
 import subprocess, sys
 
 ROOT = Path('/kaggle/working/minicpm_tool')
-SOURCE_REF = 'v0.1.2'
+SOURCE_REF = 'v0.1.3'
 if not ROOT.exists():
     subprocess.run(['git', 'clone', '--depth', '1', '--branch', SOURCE_REF,
                     'https://github.com/smfabrar/minicpm_tool.git', str(ROOT)], check=True)
@@ -47,7 +47,17 @@ else:
         subprocess.run(['git', '-C', str(ROOT), 'fetch', '--depth', '1', 'origin', 'tag', SOURCE_REF], check=True)
         subprocess.run(['git', '-C', str(ROOT), 'checkout', SOURCE_REF], check=True)
 subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '-e', str(ROOT)], check=True)
+# Editable installs add a .pth file for the next interpreter start. Make the
+# package visible in this already-running notebook kernel immediately.
+source_path = str(ROOT / 'src')
+if source_path not in sys.path:
+    sys.path.insert(0, source_path)
+import importlib
+importlib.invalidate_caches()
+import duplex_tools
+assert Path(duplex_tools.__file__).resolve().is_relative_to(ROOT.resolve())
 print('Package:', ROOT)
+print('Imported:', duplex_tools.__file__)
 print('Revision:', subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip())
 """)
 
