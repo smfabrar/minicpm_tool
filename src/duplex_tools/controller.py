@@ -160,7 +160,7 @@ class ContextController:
     def commit_injection(self, event_id: str, *, counter: int) -> ContextEvent:
         event = self.scheduler.commit(event_id)
         self.log.write(
-            "context_injected",
+            "context_submitted",
             event_id=event.event_id,
             request_id=event.request_id,
             version=event.request_version,

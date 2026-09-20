@@ -101,7 +101,7 @@ class VoiceDemo:
             trace = {"trial_id": self.last_trial_id, "at": datetime.now(timezone.utc).isoformat(), "transcript": transcript,
                      "action": action.kind if action else "none", "tool": action.tool if action else None,
                      "request_id": action.request_id if action else None,
-                     "model_text": "".join(stream_text), "submitted_events": [r for r in self.router.controller.log.records if r["kind"] == "context_injected"][-3:],
+                     "model_text": "".join(stream_text), "submitted_events": [r for r in self.router.controller.log.records if r["kind"] == "context_submitted"][-3:],
                      "evaluation": "unknown", "audio_file": audio}
             with (self.output_dir / "human_trials.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(trace) + "\n")
