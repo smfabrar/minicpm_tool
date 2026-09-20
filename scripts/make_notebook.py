@@ -35,10 +35,17 @@ from pathlib import Path
 import subprocess, sys
 
 ROOT = Path('/kaggle/working/minicpm_tool')
-SOURCE_REF = 'v0.1.1'
+SOURCE_REF = 'v0.1.2'
 if not ROOT.exists():
     subprocess.run(['git', 'clone', '--depth', '1', '--branch', SOURCE_REF,
                     'https://github.com/smfabrar/minicpm_tool.git', str(ROOT)], check=True)
+else:
+    current = subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip()
+    tagged = subprocess.run(['git', '-C', str(ROOT), 'rev-parse', '-q', '--verify', SOURCE_REF],
+                            capture_output=True, text=True)
+    if tagged.returncode != 0 or tagged.stdout.strip() != current:
+        subprocess.run(['git', '-C', str(ROOT), 'fetch', '--depth', '1', 'origin', 'tag', SOURCE_REF], check=True)
+        subprocess.run(['git', '-C', str(ROOT), 'checkout', SOURCE_REF], check=True)
 subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', '-e', str(ROOT)], check=True)
 print('Package:', ROOT)
 print('Revision:', subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip())

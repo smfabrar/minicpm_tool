@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
@@ -49,11 +50,23 @@ class VoiceDemo:
             paths.append(path)
         return paths
 
-    def _new_tts(self, before: set[Path]) -> str | None:
+    async def _new_tts(self, before: set[Path], flags_before: dict[Path, int], *, expect_speech: bool) -> str | None:
         import numpy as np
         import soundfile as sf
 
-        files = sorted(set(self.output_dir.rglob("wav_*.wav")) - before, key=lambda path: path.stat().st_mtime_ns)
+        deadline = time.monotonic() + (30 if expect_speech else 2)
+        last_change = time.monotonic()
+        files: list[Path] = []
+        while time.monotonic() < deadline:
+            current = sorted(set(self.output_dir.rglob("wav_*.wav")) - before, key=lambda path: path.stat().st_mtime_ns)
+            if len(current) != len(files):
+                files = current
+                last_change = time.monotonic()
+            finished = any(path.stat().st_mtime_ns > flags_before.get(path, -1)
+                           for path in self.output_dir.rglob("generation_done.flag"))
+            if files and (finished or time.monotonic() - last_change >= 2):
+                break
+            await asyncio.sleep(0.25)
         if not files:
             return None
         pieces = []
@@ -72,10 +85,12 @@ class VoiceDemo:
         if not audio_path:
             return "", "Record speech first.", None
         async with self.turn_lock:
+            log_start = len(self.router.controller.log.records)
             transcript = await asyncio.to_thread(self._transcribe, audio_path)
             segment = TranscriptSegment(uuid.uuid4().hex, 1, datetime.now(timezone.utc), transcript, True)
             route_task = asyncio.create_task(self.router.ingest(segment)) if transcript else None
             before = set(self.output_dir.rglob("wav_*.wav"))
+            flags_before = {path: path.stat().st_mtime_ns for path in self.output_dir.rglob("generation_done.flag")}
             stream_text: list[str] = []
             chunks = self._split_audio(audio_path)
             for path in chunks:
@@ -96,12 +111,12 @@ class VoiceDemo:
                 sf.write(silence, np.zeros(16000, dtype="float32"), 16000)
                 await self.session.prefill(audio_path=str(silence), counter=self.counter, boundary=Boundary.UNIT)
                 stream_text.extend(self._decode_text(await self.session.decode(debug_dir=str(self.output_dir), round_idx=self.counter - 1)))
-            audio = self._new_tts(before)
+            audio = await self._new_tts(before, flags_before, expect_speech=bool(stream_text))
             self.last_trial_id = uuid.uuid4().hex[:12]
             trace = {"trial_id": self.last_trial_id, "at": datetime.now(timezone.utc).isoformat(), "transcript": transcript,
                      "action": action.kind if action else "none", "tool": action.tool if action else None,
                      "request_id": action.request_id if action else None,
-                     "model_text": "".join(stream_text), "submitted_events": [r for r in self.router.controller.log.records if r["kind"] == "context_submitted"][-3:],
+                     "model_text": "".join(stream_text), "submitted_events": [r for r in self.router.controller.log.records[log_start:] if r["kind"] == "context_submitted"],
                      "evaluation": "unknown", "audio_file": audio}
             with (self.output_dir / "human_trials.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(trace) + "\n")

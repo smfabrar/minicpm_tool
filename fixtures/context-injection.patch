@@ -200,3 +200,78 @@ index ab524b3..1254c61 100644
 -void omni_bench_vision(struct vision_ctx * ctx_vision, int n_threads, const char * image_path);
 \ No newline at end of file
 +void omni_bench_vision(struct vision_ctx * ctx_vision, int n_threads, const char * image_path);
+diff --git a/tools/server/server-omni.cpp b/tools/server/server-omni.cpp
+index 851038a..147a9f8 100644
+--- a/tools/server/server-omni.cpp
++++ b/tools/server/server-omni.cpp
+@@ -172,7 +172,7 @@ int main(int argc, char ** argv) {
+         }
+ 
+         if (!check_file("LLM",    params.model.path) ||
+-            !check_file("vision", params.vpm_model)  ||
++            (media_type == 2 && !check_file("vision", params.vpm_model)) ||
+             !check_file("audio",  params.apm_model)  ||
+             (use_tts && !check_file("tts", params.tts_model))) {
+             return;
+@@ -194,16 +194,30 @@ int main(int argc, char ** argv) {
+             return;
+         }
+ 
+-        // voice clone / assistant prompt
+-        if (data.contains("voice_clone_prompt")) octx->omni_voice_clone_prompt = data["voice_clone_prompt"];
+-        if (data.contains("assistant_prompt")) octx->omni_assistant_prompt = data["assistant_prompt"];
++        // Voice-clone / assistant prompt for the selected input mode.
++        if (media_type == 1) {
++            if (data.contains("voice_clone_prompt")) octx->audio_voice_clone_prompt = data["voice_clone_prompt"];
++            if (data.contains("assistant_prompt")) octx->audio_assistant_prompt = data["assistant_prompt"];
++        } else {
++            if (data.contains("voice_clone_prompt")) octx->omni_voice_clone_prompt = data["voice_clone_prompt"];
++            if (data.contains("assistant_prompt")) octx->omni_assistant_prompt = data["assistant_prompt"];
++        }
++
++        // Complete the reserved index-0 prefill before publishing the context.
++        // This initializes the system/reference-audio prompt and starts the
++        // serialized duplex pipeline. User audio therefore begins at cnt=1.
++        if (!stream_prefill(octx, voice_audio, "", 0)) {
++            omni_free(octx);
++            res_error(res, format_error_response("omni_init system prefill failed"));
++            return;
++        }
+ 
+         {
+             std::lock_guard<std::mutex> lock(state.octx_mutex);
+             state.octx = octx;
+         }
+ 
+-        res_ok(res, {{"success", true}});
++        res_ok(res, {{"success", true}, {"next_cnt", 1}});
+     });
+ 
+     // POST /v1/stream/prefill
+@@ -244,7 +258,12 @@ int main(int argc, char ** argv) {
+             return;
+         }
+ 
+-        res_ok(res, {{"success", true}, {"audio_path_prefix", audio_path}, {"cnt", cnt}});
++        res_ok(res, {
++            {"success", true},
++            {"audio_path_prefix", audio_path},
++            {"cnt", cnt},
++            {"text_injected", !text.empty()},
++        });
+     });
+ 
+     // POST /v1/stream/decode (SSE)
+@@ -411,7 +430,11 @@ int main(int argc, char ** argv) {
+     });
+ 
+     // start server
+-    svr.listen("0.0.0.0", params.port);
++    LOG_INF("Omni HTTP server listening on %s:%d\n", params.hostname.c_str(), params.port);
++    if (!svr.listen(params.hostname, params.port)) {
++        LOG_ERR("Omni HTTP server failed to bind %s:%d\n", params.hostname.c_str(), params.port);
++        return 1;
++    }
+ 
+     // cleanup
+     {
