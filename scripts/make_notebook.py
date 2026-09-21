@@ -31,7 +31,7 @@ Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite
 """)
 
 code("""# 1 — The only line to edit when selecting a newer tested release.
-SOURCE_REF = 'v0.1.9'
+SOURCE_REF = 'v0.1.10'
 print('Selected release:', SOURCE_REF)
 """)
 
@@ -216,8 +216,13 @@ reverse = subprocess.run(['git', '-C', str(UPSTREAM), 'apply', '--reverse', '--c
 if reverse.returncode != 0:
     subprocess.run(['git', '-C', str(UPSTREAM), 'apply', '--check', str(patch)], check=True)
     subprocess.run(['git', '-C', str(UPSTREAM), 'apply', str(patch)], check=True)
+# Kaggle exposes the CUDA runtime and cuBLAS but may omit the unversioned
+# libcuda.so needed to create CMake's CUDA::cuda_driver target. VMM is the
+# only ggml path that links that target, so disable VMM while retaining CUDA
+# kernels and GPU layer offload.
 subprocess.run(['cmake', '-S', str(UPSTREAM), '-B', str(UPSTREAM / 'build'),
-                '-DCMAKE_BUILD_TYPE=Release', '-DGGML_CUDA=ON'], check=True)
+                '-DCMAKE_BUILD_TYPE=Release', '-DGGML_CUDA=ON',
+                '-DGGML_CUDA_NO_VMM=ON'], check=True)
 subprocess.run(['cmake', '--build', str(UPSTREAM / 'build'), '--target', 'llama-omni-server', '-j', '4'], check=True)
 SERVER_BIN = UPSTREAM / 'build' / 'bin' / 'llama-omni-server'
 assert SERVER_BIN.is_file()
