@@ -10,7 +10,7 @@ from typing import Any
 
 from .contracts import CallerAction, TranscriptSegment
 
-_TOOL_CALL = re.compile(r"<tool_call>\s*(\{.*?\})\s*</tool_call>", re.DOTALL)
+_TOOL_CALL = re.compile(r"<tool_call>\s*(\{.*\})\s*(?:</tool_call>)?", re.DOTALL)
 
 
 def _arguments(value: Any) -> dict[str, Any] | None:
@@ -53,43 +53,89 @@ def parse_granite_output(raw: str) -> CallerAction:
 
 
 class GraniteToolCaller:
-    """A generator is loaded once and called in a worker thread per committed turn."""
+    """Use model likelihood for routing, then native generation for arguments."""
 
-    SYSTEM = (
-        "You route ONLY the last user utterance. Do not answer it. Select at most one allowed tool. "
-        "Use room_lookup only for the room or location of a NAMED event. "
-        "Use calculator only for an explicit arithmetic question. "
-        "Use document_search only when the user explicitly asks to search local documents. "
-        "Never substitute document_search for a room lookup. "
-        "For a complete request with all required details, emit one native <tool_call> JSON object. "
-        "For ordinary conversation, thanks, or unfinished speech emit exactly {\"action\":\"none\"}. "
-        "For a complete request missing a required detail emit JSON with action clarify and a short message. "
-        "For an explicit correction to a pending request emit JSON with action amend, request_id, tool, arguments. "
-        "For an explicit cancellation emit JSON with action cancel and request_id. "
-        "Never invent a request ID or missing tool argument. Output only the action."
-    )
+    ROUTE_SYSTEM = "Classify the latest user speech for a voice tool router. Return only the requested label letter."
 
     def __init__(self, generate: Callable[[list[dict[str, str]], list[dict[str, Any]]], str]) -> None:
         self.generate = generate
 
     async def decide(self, segment: TranscriptSegment, pending: Mapping[str, str], tools: list[dict[str, Any]]) -> CallerAction:
-        available = {tool["function"]["name"] for tool in tools}
-        messages = [{"role": "system", "content": self.SYSTEM + " Pending request metadata: " + json.dumps(dict(pending), sort_keys=True)}]
-        examples = [
-            ("Thanks, that helps.", '{"action":"none"}'),
-            ("What room is the", '{"action":"none"}'),
-            ("Find the room for my seminar.", '{"action":"clarify","message":"Which seminar?"}'),
+        schemas = {tool["function"]["name"]: tool for tool in tools}
+        options = [
+            ("A", "no action: ordinary conversation, thanks, or unfinished speech", "none"),
+            ("B", "clarify: a tool request is clear but a required detail is missing", "clarify"),
         ]
-        if "room_lookup" in available:
-            examples.append(("Where is the chemistry colloquium?", '<tool_call>{"name":"room_lookup","arguments":{"name":"chemistry colloquium"}}</tool_call>'))
-        if "calculator" in available:
-            examples.append(("What is 8 times 9?", '<tool_call>{"name":"calculator","arguments":{"expression":"8 * 9"}}</tool_call>'))
-        if "document_search" in available:
-            examples.append(("Search the local documents for lab access.", '<tool_call>{"name":"document_search","arguments":{"query":"lab access"}}</tool_call>'))
-        for user, assistant in examples:
-            messages.extend(({"role": "user", "content": user}, {"role": "assistant", "content": assistant}))
-        messages.append({"role": "user", "content": segment.text})
-        return parse_granite_output(await asyncio.to_thread(self.generate, messages, tools))
+        tool_labels = {"room_lookup": "C", "calculator": "D", "document_search": "E"}
+        descriptions = {
+            "room_lookup": "room_lookup: asks for the room or location of a named event",
+            "calculator": "calculator: asks for explicit arithmetic",
+            "document_search": "document_search: explicitly asks to search local documents",
+        }
+        for name in ("room_lookup", "calculator", "document_search"):
+            if name in schemas:
+                options.append((tool_labels[name], descriptions[name], name))
+        if pending:
+            options.extend((("F", "cancel: explicitly cancels a pending request", "cancel"),
+                            ("G", "amend: explicitly corrects a pending request", "amend")))
+        examples = (
+            "Examples:\n"
+            "Thank you, that helps. -> A\n"
+            "What room is the -> A\n"
+            "Find the room for my seminar. -> B\n"
+            "Where is the chemistry colloquium? -> C\n"
+            "What is 8 times 9? -> D\n"
+            "Search the local documents for lab access. -> E\n"
+        )
+        menu = "\n".join(f"{label} = {description}" for label, description, _ in options)
+        route_messages = [
+            {"role": "system", "content": self.ROUTE_SYSTEM},
+            {"role": "user", "content": f"{examples}\nLabels:\n{menu}\n\nLatest speech: {segment.text}\nLabel:"},
+        ]
+        label = await asyncio.to_thread(score_choice, self.generate, route_messages, [item[0] for item in options])
+        selected = next(action for candidate, _, action in options if candidate == label)
+        if selected == "none":
+            return CallerAction("none", raw=f"route={label}")
+        if selected == "clarify":
+            return CallerAction("clarify", message="Please provide the missing detail.", raw=f"route={label}")
+        if selected == "cancel":
+            request_id = next(iter(pending)) if len(pending) == 1 else None
+            return CallerAction("cancel" if request_id else "clarify", request_id=request_id,
+                                message="Which pending request?" if request_id is None else "", raw=f"route={label}")
+        if selected == "amend":
+            return CallerAction("clarify", message="Please restate the corrected complete request.", raw=f"route={label}")
+
+        argument_messages = [
+            {"role": "system", "content": "Call the provided tool for the user speech. Copy only details present in that speech. Output only the native tool call."},
+            {"role": "user", "content": segment.text},
+        ]
+        raw = await asyncio.to_thread(self.generate, argument_messages, [schemas[selected]])
+        action = parse_granite_output(raw)
+        if action.kind != "call" or action.tool != selected:
+            return CallerAction("invalid", message="argument generation did not call the selected tool", raw=f"route={label}\n{raw}")
+        return CallerAction("call", tool=action.tool, arguments=action.arguments, raw=f"route={label}\n{raw}")
+
+
+def score_choice(generator: Any, messages: list[dict[str, str]], choices: list[str]) -> str:
+    """Choose a closed label by conditional log likelihood, without free generation."""
+    if not hasattr(generator, "model") or not hasattr(generator, "tokenizer") or not hasattr(generator, "torch"):
+        raise TypeError("Granite generator must expose model, tokenizer, and torch for closed-label routing")
+    torch = generator.torch
+    tokenizer = generator.tokenizer
+    prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
+    prompt_ids = tokenizer(prompt, add_special_tokens=False, return_tensors="pt")["input_ids"].to(generator.model.device)
+    scores: dict[str, float] = {}
+    with torch.inference_mode():
+        for choice in choices:
+            choice_ids = tokenizer(choice, add_special_tokens=False, return_tensors="pt")["input_ids"].to(generator.model.device)
+            full = torch.cat((prompt_ids, choice_ids), dim=1)
+            logits = generator.model(input_ids=full).logits
+            start = prompt_ids.shape[1] - 1
+            token_logits = logits[:, start:start + choice_ids.shape[1], :]
+            log_probs = torch.log_softmax(token_logits, dim=-1)
+            selected = log_probs.gather(-1, choice_ids.unsqueeze(-1)).squeeze(-1)
+            scores[choice] = float(selected.mean().item())
+    return max(scores, key=scores.get)
 
 
 class TransformersGraniteGenerator:

@@ -35,7 +35,7 @@ from pathlib import Path
 import subprocess, sys
 
 ROOT = Path('/kaggle/working/minicpm_tool')
-SOURCE_REF = 'v0.1.4'
+SOURCE_REF = 'v0.1.5'
 if not ROOT.exists():
     subprocess.run(['git', 'clone', '--depth', '1', '--branch', SOURCE_REF,
                     'https://github.com/smfabrar/minicpm_tool.git', str(ROOT)], check=True)
@@ -77,7 +77,7 @@ sim = SimulatedAdapter(AdapterCapabilities(True, False, False, False, True))
 print('Simulated capability profile:', sim.capabilities())
 """)
 
-code("""# 4 — CPU only: load Granite once and measure real caller proposals.
+code("""# 4 — CPU only: load Granite once and measure staged model routing and arguments.
 # Kaggle normally has PyTorch. This installs only the model-side packages.
 subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'transformers>=4.54,<5', 'accelerate'], check=True)
 import json, time

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import unittest
 from datetime import datetime, timezone
+from unittest.mock import patch
 
 from duplex_tools.caller import GraniteToolCaller, parse_granite_output
 from duplex_tools.contracts import CallerAction, TranscriptSegment
@@ -57,19 +58,40 @@ class CallerTests(unittest.TestCase):
         self.assertEqual(parse_granite_output('{"action":"none"}').kind, "none")
         self.assertEqual(parse_granite_output("I might call a tool").kind, "invalid")
         self.assertEqual(parse_granite_output('<tool_call>{"name":"room_lookup","arguments":{"name":"event"}}</tool_call>. Request ID: made-up').kind, "invalid")
+        missing_close = parse_granite_output('<tool_call>{"name":"calculator","arguments":{"expression":"2+3"}}<|end_of_text|>')
+        self.assertEqual(missing_close.arguments, {"expression": "2+3"})
 
     def test_latest_speech_is_the_final_user_turn(self):
         import asyncio
         seen = []
 
         def generate(messages, tools):
-            seen.extend(messages)
             return '{"action":"none"}'
 
+        def choose(generator, messages, choices):
+            seen.extend(messages)
+            return "A"
+
         caller = GraniteToolCaller(generate)
-        result = asyncio.run(caller.decide(segment(), {}, TOOL_SCHEMAS))
+        with patch("duplex_tools.caller.score_choice", side_effect=choose):
+            result = asyncio.run(caller.decide(segment(), {}, TOOL_SCHEMAS))
         self.assertEqual(result.kind, "none")
-        self.assertEqual(seen[-1], {"role": "user", "content": "Find the robotics seminar room"})
+        self.assertIn("Latest speech: Find the robotics seminar room", seen[-1]["content"])
+
+    def test_selected_tool_is_only_schema_used_for_arguments(self):
+        import asyncio
+        seen_tools = []
+
+        def generate(messages, tools):
+            seen_tools.append(tools)
+            return '<tool_call>{"name":"room_lookup","arguments":{"name":"robotics seminar"}}'
+
+        caller = GraniteToolCaller(generate)
+        with patch("duplex_tools.caller.score_choice", return_value="C"):
+            result = asyncio.run(caller.decide(segment(), {}, TOOL_SCHEMAS))
+        self.assertEqual(result.tool, "room_lookup")
+        self.assertEqual(len(seen_tools[0]), 1)
+        self.assertEqual(seen_tools[0][0]["function"]["name"], "room_lookup")
 
     def test_safe_calculator_rejects_code(self):
         import asyncio
