@@ -20,22 +20,26 @@ This notebook pulls the adapter package from `smfabrar/minicpm_tool`. It has two
 
 | Phase | Run these cells | Accelerator | Purpose |
 |---|---|---|---|
-| A | 1–5, ending after the Granite caller probe | **None** | Install the package, run controller tests, inspect parser behavior, and call the real Granite 350M model on a few transcripts. |
-| B | Rerun setup cell 1, then cells 6 onward | **GPU** | Build the patched MiniCPM runtime, attach or download GGUF modules, and speak to the persistent session. |
+| A | 1–6, ending after the Granite caller probe | **None** | Select a tag, install the package, run controller tests, inspect parser behavior, and call the real Granite 350M model on a few transcripts. |
+| B | Rerun cells 1–2, then cells 7 onward | **GPU** | Pull the same tag, build the patched MiniCPM runtime, attach or download GGUF modules, and speak to the persistent session. |
 
-Enable **Internet** in Kaggle Settings. Adding a GPU restarts the notebook runtime, so Python objects from phase A disappear. Reopen this notebook after the restart, rerun the first setup cell, and continue at the GPU section. Skip the CPU benchmark on the GPU clock. An attached Kaggle Dataset containing the GGUF folder saves download time; the model download cell is a fallback. Do not run the build or download cells during the CPU phase if their output is unlikely to survive your runtime restart.
+Enable **Internet** in Kaggle Settings. The first code cell contains only `SOURCE_REF`; changing that one tag and rerunning cells 1–2 updates the package. Adding a GPU restarts the notebook runtime, so Python objects from phase A disappear. After the restart rerun cells 1–2 and continue at the GPU section. Skip the CPU benchmark on the GPU clock. An attached Kaggle Dataset containing the GGUF folder saves download time; the model download cell is a fallback.
 
 The voice gate is push-to-talk: record a turn, send it, then listen. It tests a real model-selected tool and a spoken answer in one MiniCPM session. It does not yet demonstrate continuous simultaneous recording and playback. The HTTP API reports context submission; actual KV evaluation remains **unknown** without a native acknowledgement.
 
 Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite model card](https://huggingface.co/ibm-granite/granite-4.0-350m), [Granite tool format](https://github.com/ibm-granite/granite-4.0-language-models/blob/main/Granite%204.0%20Prompt%20engineering%20guide%20v2.md), [MiniCPM GGUF modules](https://huggingface.co/openbmb/MiniCPM-o-4_5-gguf).
 """)
 
-code("""# 1 — Run once on CPU, and rerun this cell after switching to GPU.
+code("""# 1 — The only line to edit when selecting a newer tested release.
+SOURCE_REF = 'v0.1.7'
+print('Selected release:', SOURCE_REF)
+""")
+
+code("""# 2 — Pull and activate SOURCE_REF. Rerun after changing the tag or switching to GPU.
 from pathlib import Path
 import subprocess, sys
 
 ROOT = Path('/kaggle/working/minicpm_tool')
-SOURCE_REF = 'v0.1.6'
 if not ROOT.exists():
     subprocess.run(['git', 'clone', '--depth', '1', '--branch', SOURCE_REF,
                     'https://github.com/smfabrar/minicpm_tool.git', str(ROOT)], check=True)
@@ -54,6 +58,10 @@ if source_path not in sys.path:
     sys.path.insert(0, source_path)
 import importlib
 importlib.invalidate_caches()
+# Remove modules imported from an older selected tag in this kernel.
+for module_name in list(sys.modules):
+    if module_name == 'duplex_tools' or module_name.startswith('duplex_tools.'):
+        del sys.modules[module_name]
 import duplex_tools
 assert Path(duplex_tools.__file__).resolve().is_relative_to(ROOT.resolve())
 print('Package:', ROOT)
@@ -61,11 +69,11 @@ print('Imported:', duplex_tools.__file__)
 print('Revision:', subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip())
 """)
 
-code("""# 2 — CPU only: check controller, correction, cancellation, parser, and adapter behavior.
+code("""# 3 — CPU only: check controller, correction, cancellation, parser, and adapter behavior.
 subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', str(ROOT / 'tests'), '-v'], check=True)
 """)
 
-code("""# 3 — CPU only: inspect the native Granite parser and simulated adapter.
+code("""# 4 — CPU only: inspect the native Granite parser and simulated adapter.
 import asyncio
 from duplex_tools.caller import parse_granite_output
 from duplex_tools.simulated import SimulatedAdapter
@@ -77,7 +85,7 @@ sim = SimulatedAdapter(AdapterCapabilities(True, False, False, False, True))
 print('Simulated capability profile:', sim.capabilities())
 """)
 
-code("""# 4 — CPU only: load Granite once and measure staged model routing and arguments.
+code("""# 5 — CPU only: load Granite once and measure staged model routing and arguments.
 # Kaggle normally has PyTorch. This installs only the model-side packages.
 subprocess.run([sys.executable, '-m', 'pip', 'install', '-q', 'transformers>=4.54,<5', 'accelerate'], check=True)
 import json, time
@@ -117,7 +125,7 @@ print('Fully correct:', sum(r['passed'] for r in rows), '/', len(rows))
 print('CPU gate:', 'PASS' if all(r['passed'] for r in rows) else 'FAIL — keep GPU off and review caller errors')
 """)
 
-code("""# 5 — CPU only: edit this sentence for a quick human-written transcript probe.
+code("""# 6 — CPU only: edit this sentence for a quick human-written transcript probe.
 sentence = 'Where is the robotics seminar?'
 segment = TranscriptSegment('manual-text', 1, datetime.now(timezone.utc), sentence, True)
 proposal = await caller.decide(segment, {}, TOOL_SCHEMAS)
@@ -127,10 +135,10 @@ print('Raw model output:', proposal.raw)
 
 md("""## Stop here and enable the GPU
 
-Proceed only when the CPU caller cell reports **PASS**. In Kaggle Settings select **Accelerator → GPU**. Kaggle restarts the runtime. Rerun **cell 1 only**, then continue below. Phase B needs CUDA for MiniCPM. The 350M caller and tiny speech recognizer stay on CPU so the GPU is reserved for MiniCPM. If the GPU has too little memory, reduce `N_GPU_LAYERS` in the server cell and note the resulting latency.
+Proceed only when the CPU caller cell reports **PASS**. In Kaggle Settings select **Accelerator → GPU**. Kaggle restarts the runtime. Rerun **cells 1–2**, then continue below. Phase B needs CUDA for MiniCPM. The 350M caller and tiny speech recognizer stay on CPU so the GPU is reserved for MiniCPM. If the GPU has too little memory, reduce `N_GPU_LAYERS` in the server cell and note the resulting latency.
 """)
 
-code("""# 6 — GPU phase: verify the accelerator and install only the voice dependencies.
+code("""# 7 — GPU phase: verify the accelerator and install only the voice dependencies.
 import torch
 assert torch.cuda.is_available(), 'Enable a GPU in Kaggle Settings before continuing.'
 print(torch.cuda.get_device_name(0))
@@ -139,7 +147,7 @@ subprocess.run([sys.executable, '-m', 'pip', 'install', '-q',
                 'gradio>=5,<7', 'soundfile', 'faster-whisper'], check=True)
 """)
 
-code("""# 7 — Prefer an attached Kaggle Dataset with this GGUF folder; otherwise download.
+code("""# 8 — Prefer an attached Kaggle Dataset with this GGUF folder; otherwise download.
 from huggingface_hub import snapshot_download
 
 # Example: Path('/kaggle/input/your-minicpm-gguf/MiniCPM-o-4_5-gguf')
@@ -165,7 +173,7 @@ assert not missing, f'Missing GGUF modules: {missing}'
 print('Model directory:', MODEL_DIR)
 """)
 
-code("""# 8 — Build the pinned upstream runtime with the repository's tested patch.
+code("""# 9 — Build the pinned upstream runtime with the repository's tested patch.
 UPSTREAM = Path('/kaggle/working/llama.cpp-omni')
 PIN = '64d092c60db4b4ee45768476bd752f03fdcc98ea'
 if not UPSTREAM.exists():
@@ -183,7 +191,7 @@ SERVER_BIN = UPSTREAM / 'build' / 'bin' / 'llama-omni-server'
 assert SERVER_BIN.is_file()
 """)
 
-code("""# 9 — Start one persistent local MiniCPM server and wait for HTTP readiness.
+code("""# 10 — Start one persistent local MiniCPM server and wait for HTTP readiness.
 import subprocess, time, urllib.request
 
 N_GPU_LAYERS = 99
@@ -210,7 +218,7 @@ else:
 print('MiniCPM server is ready')
 """)
 
-code("""# 10 — Load CPU caller and recognizer once, then initialize MiniCPM once.
+code("""# 11 — Load CPU caller and recognizer once, then initialize MiniCPM once.
 from faster_whisper import WhisperModel
 from duplex_tools.caller import GraniteToolCaller, TransformersGraniteGenerator
 from duplex_tools.controller import ContextController, JsonlEventLog
@@ -238,7 +246,7 @@ voice_demo = VoiceDemo(session, router, OUTPUT, recognizer)
 print('Adapter capabilities:', session.capabilities())
 """)
 
-code("""# 11 — Human voice gate. The Gradio share URL is public; this one has a random password.
+code("""# 12 — Human voice gate. The Gradio share URL is public; this one has a random password.
 import secrets
 password = secrets.token_urlsafe(12)
 app = make_gradio_ui(voice_demo)
