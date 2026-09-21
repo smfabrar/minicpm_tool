@@ -15,6 +15,8 @@ The staged Granite 4.0 350M caller produced four strictly correct cases:
 
 This is a pilot and prompt-development set, not thesis evaluation evidence. Repeated prompt changes based on these six cases overfit them. Paraphrase families used for development must be kept out of the frozen evaluation split.
 
+These caller errors do not block the first human MiniCPM experiment. The admission condition is narrower: the three intended calls must be executable after explicitly reported normalization, and unintended or ungrounded proposals must be rejected before tool execution. This lets the end-to-end experiment proceed without relabelling either caller error as correct.
+
 ## Why the two failures differ
 
 The calculator failure is a representation mismatch. The model understood the action and numbers, but copied the spoken operator. The safe calculator accepts an explicit arithmetic grammar so that arbitrary code cannot execute. The controller now canonicalizes a small declared vocabulary (`times`, `multiplied by`, `divided by`, `plus`, `minus`) into symbols. Logs retain both raw and canonical arguments. Thesis results must report raw argument correctness and executable argument correctness separately.

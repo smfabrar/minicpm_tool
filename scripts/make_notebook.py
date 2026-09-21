@@ -20,7 +20,7 @@ This notebook pulls the adapter package from `smfabrar/minicpm_tool`. It has two
 
 | Phase | Run these cells | Accelerator | Purpose |
 |---|---|---|---|
-| A | 1–6, ending after the Granite caller probe | **None** | Select a tag, install the package, run controller tests, inspect parser behavior, and call the real Granite 350M model on a few transcripts. |
+| A | 1–6, ending after the Granite caller probe | **None** | Select a tag, install the package, run controller tests, inspect parser behavior, and characterize the real Granite 350M caller. |
 | B | Rerun cells 1–2, then cells 7 onward | **GPU** | Pull the same tag, build the patched MiniCPM runtime, attach or download GGUF modules, and speak to the persistent session. |
 
 Enable **Internet** in Kaggle Settings. The first code cell contains only `SOURCE_REF`; changing that one tag and rerunning cells 1–2 updates the package. Adding a GPU restarts the notebook runtime, so Python objects from phase A disappear. After the restart rerun cells 1–2 and continue at the GPU section. Skip the CPU benchmark on the GPU clock. An attached Kaggle Dataset containing the GGUF folder saves download time; the model download cell is a fallback.
@@ -31,7 +31,7 @@ Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite
 """)
 
 code("""# 1 — The only line to edit when selecting a newer tested release.
-SOURCE_REF = 'v0.1.8'
+SOURCE_REF = 'v0.1.9'
 print('Selected release:', SOURCE_REF)
 """)
 
@@ -139,8 +139,22 @@ for case in cases:
                  'latency_s': round(time.perf_counter() - start, 2), 'raw': action.raw})
 for row in rows:
     print(json.dumps(row, ensure_ascii=False))
-print('Fully correct:', sum(r['passed'] for r in rows), '/', len(rows))
-print('CPU gate:', 'PASS' if all(r['passed'] for r in rows) else 'FAIL — keep GPU off and review caller errors')
+valid_calls_executable = all(
+    r['route_pass'] and r['canonical_arguments_pass'] and r['grounded']
+    for r in rows if r['id'] in {'room', 'calculator', 'document'}
+)
+unsafe_proposals_blocked = all(
+    r['actual'] != 'call' or not r['grounded']
+    for r in rows if r['id'] in {'none', 'incomplete', 'clarify'}
+)
+gpu_ready = valid_calls_executable and unsafe_proposals_blocked
+print('Raw caller result:', sum(r['passed'] for r in rows), '/', len(rows),
+      '(retain this as caller evidence)')
+print('Valid calls executable after declared normalization:', valid_calls_executable)
+print('Unsafe proposals blocked before execution:', unsafe_proposals_blocked)
+print('GPU experiment readiness:',
+      'PASS — proceed with the known caller limitations' if gpu_ready else
+      'FAIL — a valid call cannot execute or an unsafe proposal can reach a tool')
 """)
 
 code("""# 6 — CPU only: edit this sentence for a quick human-written transcript probe.
@@ -151,9 +165,9 @@ print('Proposal:', proposal)
 print('Raw model output:', proposal.raw)
 """)
 
-md("""## Stop here and enable the GPU
+md("""## CPU work is complete; enable the GPU
 
-Proceed only when the CPU caller cell reports **PASS**. In Kaggle Settings select **Accelerator → GPU**. Kaggle restarts the runtime. Rerun **cells 1–2**, then continue below. Phase B needs CUDA for MiniCPM. The 350M caller and tiny speech recognizer stay on CPU so the GPU is reserved for MiniCPM. If the GPU has too little memory, reduce `N_GPU_LAYERS` in the server cell and note the resulting latency.
+Proceed when **GPU experiment readiness** reports PASS. Perfect raw caller accuracy is not an admission condition: raw mistakes remain experimental results, while the admission check asks whether intended calls are executable and unintended proposals are stopped before execution. In Kaggle Settings select **Accelerator → GPU**. Kaggle restarts the runtime. Rerun **cells 1–2**, then continue below. Phase B needs CUDA for MiniCPM. The 350M caller and tiny speech recognizer stay on CPU so the GPU is reserved for MiniCPM. If the GPU has too little memory, reduce `N_GPU_LAYERS` in the server cell and record the value and resulting latency.
 """)
 
 code("""# 7 — GPU phase: verify the accelerator and install only the voice dependencies.

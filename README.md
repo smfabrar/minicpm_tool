@@ -6,7 +6,9 @@ This repository extracts the reusable tool path from the MiniCPM experiments int
 
 Open [`notebooks/kaggle_duplex_tools.ipynb`](notebooks/kaggle_duplex_tools.ipynb) in Kaggle. Enable Internet. Set `SOURCE_REF` in the first code cell and run the CPU phase. After enabling a GPU and Kaggle restarts the runtime, rerun the tag and setup cells. The GPU phase builds the pinned patched `llama.cpp-omni`, locates or downloads the audio-only GGUF modules, starts the server, and opens a password-protected microphone UI. Ask about the robotics seminar and listen for **B742**. The UI records the transcript, selected action, HTTP submission, model text, audio file, and your listening verdict.
 
-The notebook clones this repository over HTTPS at tag `v0.1.8`; Kaggle needs no SSH key. A Kaggle Dataset containing the required GGUF folder can be attached to save GPU-time downloads. The fallback downloads the official modules from Hugging Face. The caller and speech recognizer run on CPU in the GPU phase, leaving VRAM for MiniCPM.
+The notebook clones this repository over HTTPS at tag `v0.1.9`; Kaggle needs no SSH key. A Kaggle Dataset containing the required GGUF folder can be attached to save GPU-time downloads. The fallback downloads the official modules from Hugging Face. The caller and speech recognizer run on CPU in the GPU phase, leaving VRAM for MiniCPM.
+
+The six-case CPU probe characterizes the caller; it is not a demand for perfect model accuracy before the real experiment. GPU admission checks that intended calls remain executable after declared normalization and that invalid or ungrounded proposals cannot reach a tool. Raw caller mistakes are still reported separately and remain failures in the thesis results.
 
 The microphone UI records one turn at a time. It is a human gate for real tool selection and spoken response in a persistent session. It does not establish continuous full-duplex overlap. `context_submitted` means HTTP prefill accepted the payload; the runtime HTTP API has no evaluation acknowledgement. The trace therefore says `evaluation: unknown`.
 
