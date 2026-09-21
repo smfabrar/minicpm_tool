@@ -31,7 +31,7 @@ Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite
 """)
 
 code("""# 1 — The only line to edit when selecting a newer tested release.
-SOURCE_REF = 'v0.1.10'
+SOURCE_REF = 'v0.1.11'
 print('Selected release:', SOURCE_REF)
 """)
 
@@ -205,30 +205,63 @@ assert not missing, f'Missing GGUF modules: {missing}'
 print('Model directory:', MODEL_DIR)
 """)
 
-code("""# 9 — Build the pinned upstream runtime with the repository's tested patch.
+code("""# 9 — Restore a saved T4 runtime, or build the pinned runtime once.
+from duplex_tools.runtime_bundle import verify_runtime_bundle
+
+# Future sessions: attach the saved notebook output and set this directory.
+# Example: '/kaggle/input/YOUR-NOTEBOOK-OUTPUT/minicpm_omni_runtime_sm75'
+ATTACHED_RUNTIME_DIR = None
 UPSTREAM = Path('/kaggle/working/llama.cpp-omni')
 PIN = '64d092c60db4b4ee45768476bd752f03fdcc98ea'
-if not UPSTREAM.exists():
-    subprocess.run(['git', 'clone', 'https://github.com/tc-mb/llama.cpp-omni.git', str(UPSTREAM)], check=True)
-subprocess.run(['git', '-C', str(UPSTREAM), 'checkout', PIN], check=True)
 patch = ROOT / 'fixtures' / 'context-injection.patch'
-reverse = subprocess.run(['git', '-C', str(UPSTREAM), 'apply', '--reverse', '--check', str(patch)], capture_output=True)
-if reverse.returncode != 0:
-    subprocess.run(['git', '-C', str(UPSTREAM), 'apply', '--check', str(patch)], check=True)
-    subprocess.run(['git', '-C', str(UPSTREAM), 'apply', str(patch)], check=True)
-# Kaggle exposes the CUDA runtime and cuBLAS but may omit the unversioned
-# libcuda.so needed to create CMake's CUDA::cuda_driver target. VMM is the
-# only ggml path that links that target, so disable VMM while retaining CUDA
-# kernels and GPU layer offload.
-subprocess.run(['cmake', '-S', str(UPSTREAM), '-B', str(UPSTREAM / 'build'),
-                '-DCMAKE_BUILD_TYPE=Release', '-DGGML_CUDA=ON',
-                '-DGGML_CUDA_NO_VMM=ON'], check=True)
-subprocess.run(['cmake', '--build', str(UPSTREAM / 'build'), '--target', 'llama-omni-server', '-j', '4'], check=True)
-SERVER_BIN = UPSTREAM / 'build' / 'bin' / 'llama-omni-server'
-assert SERVER_BIN.is_file()
+if ATTACHED_RUNTIME_DIR:
+    RUNTIME_BUNDLE = Path('/kaggle/working/minicpm_omni_runtime_sm75')
+    if RUNTIME_BUNDLE.exists():
+        import shutil
+        shutil.rmtree(RUNTIME_BUNDLE)
+    shutil.copytree(Path(ATTACHED_RUNTIME_DIR), RUNTIME_BUNDLE, symlinks=True)
+    SERVER_BIN = verify_runtime_bundle(RUNTIME_BUNDLE, expected_pin=PIN, expected_patch=patch)
+    print('Restored verified runtime; compilation skipped:', SERVER_BIN)
+else:
+    if not UPSTREAM.exists():
+        subprocess.run(['git', 'clone', 'https://github.com/tc-mb/llama.cpp-omni.git', str(UPSTREAM)], check=True)
+    subprocess.run(['git', '-C', str(UPSTREAM), 'checkout', PIN], check=True)
+    reverse = subprocess.run(['git', '-C', str(UPSTREAM), 'apply', '--reverse', '--check', str(patch)], capture_output=True)
+    if reverse.returncode != 0:
+        subprocess.run(['git', '-C', str(UPSTREAM), 'apply', '--check', str(patch)], check=True)
+        subprocess.run(['git', '-C', str(UPSTREAM), 'apply', str(patch)], check=True)
+    # Kaggle exposes the CUDA runtime and cuBLAS but may omit the unversioned
+    # libcuda.so needed for CUDA VMM. CUDA kernels and offload remain enabled.
+    subprocess.run(['cmake', '-S', str(UPSTREAM), '-B', str(UPSTREAM / 'build'),
+                    '-DCMAKE_BUILD_TYPE=Release', '-DGGML_CUDA=ON',
+                    '-DGGML_CUDA_NO_VMM=ON'], check=True)
+    subprocess.run(['cmake', '--build', str(UPSTREAM / 'build'),
+                    '--target', 'llama-omni-server', '-j', '4'], check=True)
+    SERVER_BIN = UPSTREAM / 'build' / 'bin' / 'llama-omni-server'
+    assert SERVER_BIN.is_file()
 """)
 
-code("""# 10 — Start one persistent local MiniCPM server and wait for HTTP readiness.
+code("""# 10 — Package a new build with provenance and dependency checks.
+# Run this after the build above. It is quick when a saved runtime was restored.
+from duplex_tools.runtime_bundle import create_runtime_bundle, runtime_environment
+
+if not ATTACHED_RUNTIME_DIR:
+    RUNTIME_BUNDLE = Path('/kaggle/working/minicpm_omni_runtime_sm75')
+    SERVER_BIN = create_runtime_bundle(
+        UPSTREAM / 'build' / 'bin', RUNTIME_BUNDLE,
+        patch=patch, source_pin=PIN, source_ref=SOURCE_REF,
+        build_options=['GGML_CUDA=ON', 'GGML_CUDA_NO_VMM=ON',
+                       'CMAKE_BUILD_TYPE=Release', 'CUDA_ARCH=75-real'],
+    )
+    print('Reusable runtime created:', RUNTIME_BUNDLE)
+    print('Size:', subprocess.check_output(['du', '-sh', str(RUNTIME_BUNDLE)], text=True).split()[0])
+    print('After the human experiment, Quick Save this notebook with output files.')
+else:
+    print('Using attached verified runtime:', RUNTIME_BUNDLE)
+SERVER_ENV = runtime_environment(RUNTIME_BUNDLE)
+""")
+
+code("""# 11 — Start one persistent local MiniCPM server and wait for HTTP readiness.
 import subprocess, time, urllib.request
 
 N_GPU_LAYERS = 99
@@ -240,7 +273,7 @@ if 'server_process' not in globals() or server_process.poll() is not None:
         str(SERVER_BIN), '--host', '127.0.0.1', '--port', '9060',
         '--model', str(MODEL_DIR / 'MiniCPM-o-4_5-Q4_K_M.gguf'),
         '-ngl', str(N_GPU_LAYERS), '--ctx-size', '8192',
-    ], stdout=server_log_handle, stderr=subprocess.STDOUT)
+    ], stdout=server_log_handle, stderr=subprocess.STDOUT, env=SERVER_ENV)
 for _ in range(120):
     if server_process.poll() is not None:
         raise RuntimeError(SERVER_LOG.read_text()[-4000:])
@@ -255,7 +288,7 @@ else:
 print('MiniCPM server is ready')
 """)
 
-code("""# 11 — Load CPU caller and recognizer once, then initialize MiniCPM once.
+code("""# 12 — Load CPU caller and recognizer once, then initialize MiniCPM once.
 from faster_whisper import WhisperModel
 from duplex_tools.caller import GraniteToolCaller, TransformersGraniteGenerator
 from duplex_tools.controller import ContextController, JsonlEventLog
@@ -283,7 +316,7 @@ voice_demo = VoiceDemo(session, router, OUTPUT, recognizer)
 print('Adapter capabilities:', session.capabilities())
 """)
 
-code("""# 12 — Human voice gate. The Gradio share URL is public; this one has a random password.
+code("""# 13 — Human voice gate. The Gradio share URL is public; this one has a random password.
 import secrets
 password = secrets.token_urlsafe(12)
 app = make_gradio_ui(voice_demo)
@@ -302,6 +335,12 @@ md("""## Human test procedure
 The model input counter and session stay live across all turns. `evaluation: unknown` means the HTTP prefill accepted the context but did not confirm token evaluation. Generated text and the audio file are recorded separately; the listening verdict is the spoken-answer ground truth. A missing or incorrect answer is a failed trial, not something to infer away from the tool trace.
 
 The microphone gate records complete turns. Correction or cancellation during an actively running tool, overlapping speech, and live incremental playback remain the next human gates after this first extraction.
+
+## Preserve the compiled runtime
+
+After completing the human trials, choose **Save Version → Quick Save** and include the current output files. Kaggle preserves files under `/kaggle/working` up to its output limit. In a later notebook, use **Add Input**, attach this notebook's saved output, and set `ATTACHED_RUNTIME_DIR` in cell 9 to the attached `minicpm_omni_runtime_sm75` directory. Cell 9 verifies the source commit, patch hash, every bundled file, the T4 `sm_75` architecture, and dynamic system libraries before skipping compilation.
+
+The bundle intentionally excludes model weights and Kaggle system libraries. Keep model weights in their own Kaggle Dataset. CUDA, glibc, OpenSSL, and other host libraries are recorded in `manifest.json` and checked by `ldd` during restoration. This artifact must be used on a T4; a P100 or other architecture requires its own build.
 """)
 
 notebook = {"cells": cells, "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
