@@ -31,7 +31,7 @@ Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite
 """)
 
 code("""# 1 — The only line to edit when selecting a newer tested release.
-SOURCE_REF = 'v0.1.13'
+SOURCE_REF = 'v0.1.14'
 print('Selected release:', SOURCE_REF)
 """)
 
@@ -206,6 +206,7 @@ print('Model directory:', MODEL_DIR)
 """)
 
 code("""# 9 — Restore a saved T4 runtime, or build the pinned runtime once.
+import shutil
 from duplex_tools.runtime_bundle import verify_runtime_bundle
 
 # Future sessions: attach the saved notebook output and set this directory.
@@ -226,6 +227,11 @@ else:
     if not UPSTREAM.exists():
         subprocess.run(['git', 'clone', 'https://github.com/tc-mb/llama.cpp-omni.git', str(UPSTREAM)], check=True)
     subprocess.run(['git', '-C', str(UPSTREAM), 'checkout', PIN], check=True)
+    # Upgrade an existing extraction patch without discarding compiled objects.
+    source = (UPSTREAM / 'tools/server/server-omni.cpp').read_text()
+    if '"next_cnt", 1' in source:
+        subprocess.run([sys.executable, str(ROOT / 'scripts/repair_runtime.py'),
+                        '--upstream', str(UPSTREAM), '--patch-only'], check=True)
     reverse = subprocess.run(['git', '-C', str(UPSTREAM), 'apply', '--reverse', '--check', str(patch)], capture_output=True)
     if reverse.returncode != 0:
         subprocess.run(['git', '-C', str(UPSTREAM), 'apply', '--check', str(patch)], check=True)
@@ -234,9 +240,9 @@ else:
     # libcuda.so needed for CUDA VMM. CUDA kernels and offload remain enabled.
     subprocess.run(['cmake', '-S', str(UPSTREAM), '-B', str(UPSTREAM / 'build'),
                     '-DCMAKE_BUILD_TYPE=Release', '-DGGML_CUDA=ON',
-                    '-DGGML_CUDA_NO_VMM=ON'], check=True)
+                    '-DGGML_CUDA_NO_VMM=ON', '-DLLAMA_OPENSSL=OFF'], check=True)
     subprocess.run(['cmake', '--build', str(UPSTREAM / 'build'),
-                    '--target', 'llama-omni-server', '-j', '4'], check=True)
+                    '--target', 'llama-omni-server', '-j', '2'], check=True)
     SERVER_BIN = UPSTREAM / 'build' / 'bin' / 'llama-omni-server'
     assert SERVER_BIN.is_file()
 """)
@@ -251,7 +257,7 @@ if not ATTACHED_RUNTIME_DIR:
         UPSTREAM / 'build' / 'bin', RUNTIME_BUNDLE,
         patch=patch, source_pin=PIN, source_ref=SOURCE_REF,
         build_options=['GGML_CUDA=ON', 'GGML_CUDA_NO_VMM=ON',
-                       'CMAKE_BUILD_TYPE=Release', 'CUDA_ARCH=75-real'],
+                       'LLAMA_OPENSSL=OFF', 'CMAKE_BUILD_TYPE=Release', 'CUDA_ARCH=75-real'],
     )
     print('Reusable runtime created:', RUNTIME_BUNDLE)
     print('Size:', subprocess.check_output(['du', '-sh', str(RUNTIME_BUNDLE)], text=True).split()[0])
@@ -262,7 +268,7 @@ SERVER_ENV = runtime_environment(RUNTIME_BUNDLE)
 """)
 
 code("""# 11 — Start one persistent local MiniCPM server and wait for HTTP readiness.
-import socket, shutil, subprocess, time, urllib.request
+import socket, subprocess, time, urllib.request
 
 N_GPU_LAYERS = 99
 def free_local_port(candidates=(19080, 18080, 9060, 8765, 49152)):
@@ -276,16 +282,10 @@ def free_local_port(candidates=(19080, 18080, 9060, 8765, 49152)):
             return candidate
     raise RuntimeError('No candidate localhost port is available')
 
-SERVER_PORT = free_local_port()
-BASE_URL = f'http://127.0.0.1:{SERVER_PORT}'
 SERVER_LOG = Path('/kaggle/working/minicpm_server.log')
 if 'server_process' not in globals() or server_process.poll() is not None:
-    # An interrupted notebook cell can orphan its child process. Reclaim the
-    # fixed port before starting a replacement.
-    if shutil.which('fuser'):
-        subprocess.run(['fuser', '-k', f'{SERVER_PORT}/tcp'], check=False,
-                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-        time.sleep(1)
+    SERVER_PORT = free_local_port()
+    BASE_URL = f'http://127.0.0.1:{SERVER_PORT}'
     server_log_handle = SERVER_LOG.open('w')
     server_process = subprocess.Popen([
         str(SERVER_BIN), '--host', '127.0.0.1', '--port', str(SERVER_PORT),

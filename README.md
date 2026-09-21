@@ -6,9 +6,19 @@ This repository extracts the reusable tool path from the MiniCPM experiments int
 
 Open [`notebooks/kaggle_duplex_tools.ipynb`](notebooks/kaggle_duplex_tools.ipynb) in Kaggle. Enable Internet. Set `SOURCE_REF` in the first code cell and run the CPU phase. After enabling a GPU and Kaggle restarts the runtime, rerun the tag and setup cells. The GPU phase builds the pinned patched `llama.cpp-omni`, locates or downloads the audio-only GGUF modules, starts the server, and opens a password-protected microphone UI. Ask about the robotics seminar and listen for **B742**. The UI records the transcript, selected action, HTTP submission, model text, audio file, and your listening verdict.
 
-The notebook clones this repository over HTTPS at tag `v0.1.13`; Kaggle needs no SSH key. A Kaggle Dataset containing the required GGUF folder can be attached to save GPU-time downloads. The fallback downloads the official modules from Hugging Face. The caller and speech recognizer run on CPU in the GPU phase, leaving VRAM for MiniCPM.
+The notebook clones this repository over HTTPS at tag `v0.1.14`; Kaggle needs no SSH key. A Kaggle Dataset containing the required GGUF folder can be attached to save GPU-time downloads. The fallback downloads the official modules from Hugging Face. The caller and speech recognizer run on CPU in the GPU phase, leaving VRAM for MiniCPM.
 
 The Kaggle CUDA build sets `GGML_CUDA_NO_VMM=ON`. Kaggle can expose the CUDA runtime and cuBLAS without the unversioned driver library needed by CMake's `CUDA::cuda_driver` target. Disabling ggml's virtual memory management removes that direct driver dependency while keeping CUDA kernels and GPU layer offload enabled.
+
+The localhost server is built with `LLAMA_OPENSSL=OFF`: this upstream constructs an SSL listener whenever OpenSSL is enabled, even without certificates. The native context patch also finishes each chunked HTTP decode response with `sink.done()` and captures request parameters by value. Previously the HTTP library could repeatedly invoke the response callback, decoding indefinitely while Python waited for EOF. `scripts/repair_runtime.py` applies these two SSE edits to the pinned existing checkout and rebuilds incrementally using the same build directory. CUDA objects are retained. Re-export the runtime afterward; the updated patch hash intentionally rejects older artifacts. The voice UI reports each stage and audio chunk, with elapsed times in `controller.jsonl`.
+
+Run the real HTTP transport regression without models or a GPU:
+
+```bash
+python3 scripts/check_sse_transport.py --upstream /path/to/llama.cpp-omni
+```
+
+It applies the full patch to pristine pinned source in a temporary directory, compiles the actual SSE callback against the vendored HTTP library with a simulated decoder, and checks that two HTTP requests finish with exactly two decodes. This verifies the response lifecycle; model inference and audible answers still require Kaggle testing.
 
 After compilation, the notebook creates `/kaggle/working/minicpm_omni_runtime_sm75`. It contains the server, project shared libraries, context patch, provenance, toolchain and Python versions, an `ldd` report, and checksums. Quick Save the notebook output after the experiment, then attach that output and set `ATTACHED_RUNTIME_DIR` in a future session to skip compilation. The build contains T4 `sm_75` machine code; a different GPU architecture requires another artifact. Model weights remain a separate Kaggle Dataset.
 

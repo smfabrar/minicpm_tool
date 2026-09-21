@@ -81,11 +81,19 @@ class VoiceDemo:
         sf.write(path, np.concatenate(pieces), rate)
         return str(path)
 
-    async def turn(self, audio_path: str | None) -> tuple[str, str, str | None]:
+    async def turn(self, audio_path: str | None, progress=None) -> tuple[str, str, str | None]:
         if not audio_path:
             return "", "Record speech first.", None
         async with self.turn_lock:
+            started = time.perf_counter()
+            def stage(description):
+                self.router.controller.log.write("voice_stage", stage=description,
+                                                 elapsed_s=round(time.perf_counter() - started, 3))
+                if progress is not None:
+                    progress(0, desc=description)
+
             log_start = len(self.router.controller.log.records)
+            stage("Transcribing microphone recording on CPU")
             transcript = await asyncio.to_thread(self._transcribe, audio_path)
             segment = TranscriptSegment(uuid.uuid4().hex, 1, datetime.now(timezone.utc), transcript, True)
             route_task = asyncio.create_task(self.router.ingest(segment)) if transcript else None
@@ -93,10 +101,13 @@ class VoiceDemo:
             flags_before = {path: path.stat().st_mtime_ns for path in self.output_dir.rglob("generation_done.flag")}
             stream_text: list[str] = []
             chunks = self._split_audio(audio_path)
-            for path in chunks:
+            for index, path in enumerate(chunks, 1):
                 self.counter += 1
+                stage(f"Sending audio chunk {index}/{len(chunks)} (counter {self.counter})")
                 await self.session.prefill(audio_path=str(path), counter=self.counter, boundary=Boundary.UNIT)
+                stage(f"Waiting for MiniCPM decode {index}/{len(chunks)}")
                 stream_text.extend(self._decode_text(await self.session.decode(debug_dir=str(self.output_dir), round_idx=self.counter - 1)))
+            stage("Waiting for tool routing and execution")
             action = await route_task if route_task else None
             await self.router.controller.wait_all()
             # A result that finished after the spoken audio still enters the
@@ -109,15 +120,19 @@ class VoiceDemo:
                 self.counter += 1
                 silence = self.output_dir / f"input_{self.counter:05d}.wav"
                 sf.write(silence, np.zeros(16000, dtype="float32"), 16000)
+                stage(f"Delivering queued tool context (counter {self.counter})")
                 await self.session.prefill(audio_path=str(silence), counter=self.counter, boundary=Boundary.UNIT)
                 stream_text.extend(self._decode_text(await self.session.decode(debug_dir=str(self.output_dir), round_idx=self.counter - 1)))
+            stage("Collecting generated speech (up to 30 seconds)")
             audio = await self._new_tts(before, flags_before, expect_speech=bool(stream_text))
+            stage("Turn complete")
             self.last_trial_id = uuid.uuid4().hex[:12]
             trace = {"trial_id": self.last_trial_id, "at": datetime.now(timezone.utc).isoformat(), "transcript": transcript,
                      "action": action.kind if action else "none", "tool": action.tool if action else None,
                      "request_id": action.request_id if action else None,
                      "model_text": "".join(stream_text), "submitted_events": [r for r in self.router.controller.log.records[log_start:] if r["kind"] == "context_submitted"],
-                     "evaluation": "unknown", "audio_file": audio}
+                     "evaluation": "unknown", "audio_file": audio,
+                     "elapsed_s": round(time.perf_counter() - started, 3)}
             with (self.output_dir / "human_trials.jsonl").open("a", encoding="utf-8") as handle:
                 handle.write(json.dumps(trace) + "\n")
             return transcript, json.dumps(trace, indent=2), audio
@@ -145,6 +160,9 @@ class VoiceDemo:
 def make_gradio_ui(demo: VoiceDemo):
     import gradio as gr
 
+    async def send_turn(audio_path, progress=gr.Progress()):
+        return await demo.turn(audio_path, progress=progress)
+
     with gr.Blocks(title="Duplex Tools human gate") as app:
         gr.Markdown("# Speak with MiniCPM and test its tools\nRecord a short turn, then submit. Read the transcript and tool trace, and listen to the returned speech. The MiniCPM session stays initialized across turns.")
         microphone = gr.Audio(sources=["microphone"], type="filepath", format="wav", label="Your voice")
@@ -152,7 +170,7 @@ def make_gradio_ui(demo: VoiceDemo):
         transcript = gr.Textbox(label="User transcript")
         trace = gr.Code(label="Tool and delivery trace", language="json")
         speech = gr.Audio(label="MiniCPM speech", autoplay=False)
-        submit.click(demo.turn, inputs=[microphone], outputs=[transcript, trace, speech], concurrency_limit=1)
+        submit.click(send_turn, inputs=[microphone], outputs=[transcript, trace, speech], concurrency_limit=1)
         verdict = gr.Radio(["correct", "incorrect", "no audible answer", "unclear"], label="What did you hear?")
         notes = gr.Textbox(label="Notes or exact spoken words")
         save = gr.Button("Save listening verdict")
