@@ -31,7 +31,7 @@ Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite
 """)
 
 code("""# 1 — The only line to edit when selecting a newer tested release.
-SOURCE_REF = 'v0.1.11'
+SOURCE_REF = 'v0.1.13'
 print('Selected release:', SOURCE_REF)
 """)
 
@@ -262,21 +262,33 @@ SERVER_ENV = runtime_environment(RUNTIME_BUNDLE)
 """)
 
 code("""# 11 — Start one persistent local MiniCPM server and wait for HTTP readiness.
-import shutil, subprocess, time, urllib.request
+import socket, shutil, subprocess, time, urllib.request
 
 N_GPU_LAYERS = 99
-BASE_URL = 'http://127.0.0.1:9060'
+def free_local_port(candidates=(19080, 18080, 9060, 8765, 49152)):
+    for candidate in candidates:
+        with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as probe:
+            probe.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            try:
+                probe.bind(('127.0.0.1', candidate))
+            except OSError:
+                continue
+            return candidate
+    raise RuntimeError('No candidate localhost port is available')
+
+SERVER_PORT = free_local_port()
+BASE_URL = f'http://127.0.0.1:{SERVER_PORT}'
 SERVER_LOG = Path('/kaggle/working/minicpm_server.log')
 if 'server_process' not in globals() or server_process.poll() is not None:
     # An interrupted notebook cell can orphan its child process. Reclaim the
     # fixed port before starting a replacement.
     if shutil.which('fuser'):
-        subprocess.run(['fuser', '-k', '9060/tcp'], check=False,
+        subprocess.run(['fuser', '-k', f'{SERVER_PORT}/tcp'], check=False,
                        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         time.sleep(1)
     server_log_handle = SERVER_LOG.open('w')
     server_process = subprocess.Popen([
-        str(SERVER_BIN), '--host', '127.0.0.1', '--port', '9060',
+        str(SERVER_BIN), '--host', '127.0.0.1', '--port', str(SERVER_PORT),
         '--model', str(MODEL_DIR / 'MiniCPM-o-4_5-Q4_K_M.gguf'),
         '-ngl', str(N_GPU_LAYERS), '--ctx-size', '8192',
     ], stdout=server_log_handle, stderr=subprocess.STDOUT, env=SERVER_ENV)
@@ -291,7 +303,7 @@ for _ in range(120):
         time.sleep(2)
 else:
     raise TimeoutError('MiniCPM server did not become ready; inspect ' + str(SERVER_LOG))
-print('MiniCPM server is ready')
+print('MiniCPM server is ready at', BASE_URL)
 """)
 
 code("""# 12 — Load CPU caller and recognizer once, then initialize MiniCPM once.

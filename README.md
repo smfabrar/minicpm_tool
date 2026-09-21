@@ -6,7 +6,7 @@ This repository extracts the reusable tool path from the MiniCPM experiments int
 
 Open [`notebooks/kaggle_duplex_tools.ipynb`](notebooks/kaggle_duplex_tools.ipynb) in Kaggle. Enable Internet. Set `SOURCE_REF` in the first code cell and run the CPU phase. After enabling a GPU and Kaggle restarts the runtime, rerun the tag and setup cells. The GPU phase builds the pinned patched `llama.cpp-omni`, locates or downloads the audio-only GGUF modules, starts the server, and opens a password-protected microphone UI. Ask about the robotics seminar and listen for **B742**. The UI records the transcript, selected action, HTTP submission, model text, audio file, and your listening verdict.
 
-The notebook clones this repository over HTTPS at tag `v0.1.12`; Kaggle needs no SSH key. A Kaggle Dataset containing the required GGUF folder can be attached to save GPU-time downloads. The fallback downloads the official modules from Hugging Face. The caller and speech recognizer run on CPU in the GPU phase, leaving VRAM for MiniCPM.
+The notebook clones this repository over HTTPS at tag `v0.1.13`; Kaggle needs no SSH key. A Kaggle Dataset containing the required GGUF folder can be attached to save GPU-time downloads. The fallback downloads the official modules from Hugging Face. The caller and speech recognizer run on CPU in the GPU phase, leaving VRAM for MiniCPM.
 
 The Kaggle CUDA build sets `GGML_CUDA_NO_VMM=ON`. Kaggle can expose the CUDA runtime and cuBLAS without the unversioned driver library needed by CMake's `CUDA::cuda_driver` target. Disabling ggml's virtual memory management removes that direct driver dependency while keeping CUDA kernels and GPU layer offload enabled.
 
