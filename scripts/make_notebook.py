@@ -262,12 +262,18 @@ SERVER_ENV = runtime_environment(RUNTIME_BUNDLE)
 """)
 
 code("""# 11 — Start one persistent local MiniCPM server and wait for HTTP readiness.
-import subprocess, time, urllib.request
+import shutil, subprocess, time, urllib.request
 
 N_GPU_LAYERS = 99
 BASE_URL = 'http://127.0.0.1:9060'
 SERVER_LOG = Path('/kaggle/working/minicpm_server.log')
 if 'server_process' not in globals() or server_process.poll() is not None:
+    # An interrupted notebook cell can orphan its child process. Reclaim the
+    # fixed port before starting a replacement.
+    if shutil.which('fuser'):
+        subprocess.run(['fuser', '-k', '9060/tcp'], check=False,
+                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        time.sleep(1)
     server_log_handle = SERVER_LOG.open('w')
     server_process = subprocess.Popen([
         str(SERVER_BIN), '--host', '127.0.0.1', '--port', '9060',
