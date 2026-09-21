@@ -6,6 +6,7 @@ import asyncio
 import json
 import re
 from collections.abc import Callable, Mapping
+from dataclasses import dataclass
 from typing import Any
 
 from .contracts import CallerAction, TranscriptSegment
@@ -92,18 +93,20 @@ class GraniteToolCaller:
             {"role": "system", "content": self.ROUTE_SYSTEM},
             {"role": "user", "content": f"{examples}\nLabels:\n{menu}\n\nLatest speech: {segment.text}\nLabel:"},
         ]
-        label = await asyncio.to_thread(score_choice, self.generate, route_messages, [item[0] for item in options])
+        route = await asyncio.to_thread(score_choices, self.generate, route_messages, [item[0] for item in options])
+        label = route.selected
+        route_raw = json.dumps({"selected": label, "scores": route.scores, "margin": route.margin}, sort_keys=True)
         selected = next(action for candidate, _, action in options if candidate == label)
         if selected == "none":
-            return CallerAction("none", raw=f"route={label}")
+            return CallerAction("none", raw=f"route={route_raw}")
         if selected == "clarify":
-            return CallerAction("clarify", message="Please provide the missing detail.", raw=f"route={label}")
+            return CallerAction("clarify", message="Please provide the missing detail.", raw=f"route={route_raw}")
         if selected == "cancel":
             request_id = next(iter(pending)) if len(pending) == 1 else None
             return CallerAction("cancel" if request_id else "clarify", request_id=request_id,
-                                message="Which pending request?" if request_id is None else "", raw=f"route={label}")
+                                message="Which pending request?" if request_id is None else "", raw=f"route={route_raw}")
         if selected == "amend":
-            return CallerAction("clarify", message="Please restate the corrected complete request.", raw=f"route={label}")
+            return CallerAction("clarify", message="Please restate the corrected complete request.", raw=f"route={route_raw}")
 
         argument_messages = [
             {"role": "system", "content": "Call the provided tool for the user speech. Copy only details present in that speech. Output only the native tool call."},
@@ -112,30 +115,46 @@ class GraniteToolCaller:
         raw = await asyncio.to_thread(self.generate, argument_messages, [schemas[selected]])
         action = parse_granite_output(raw)
         if action.kind != "call" or action.tool != selected:
-            return CallerAction("invalid", message="argument generation did not call the selected tool", raw=f"route={label}\n{raw}")
-        return CallerAction("call", tool=action.tool, arguments=action.arguments, raw=f"route={label}\n{raw}")
+            return CallerAction("invalid", message="argument generation did not call the selected tool", raw=f"route={route_raw}\n{raw}")
+        return CallerAction("call", tool=action.tool, arguments=action.arguments, raw=f"route={route_raw}\n{raw}")
 
 
-def score_choice(generator: Any, messages: list[dict[str, str]], choices: list[str]) -> str:
-    """Choose a closed label by conditional log likelihood, without free generation."""
+@dataclass(frozen=True, slots=True)
+class ChoiceScores:
+    selected: str
+    scores: dict[str, float]
+    margin: float
+
+
+def score_choices(generator: Any, messages: list[dict[str, str]], choices: list[str]) -> ChoiceScores:
+    """Score closed labels and expose the winning margin for later calibration."""
     if not hasattr(generator, "model") or not hasattr(generator, "tokenizer") or not hasattr(generator, "torch"):
         raise TypeError("Granite generator must expose model, tokenizer, and torch for closed-label routing")
     torch = generator.torch
     tokenizer = generator.tokenizer
     prompt = tokenizer.apply_chat_template(messages, add_generation_prompt=True, tokenize=False)
     prompt_ids = tokenizer(prompt, add_special_tokens=False, return_tensors="pt")["input_ids"].to(generator.model.device)
+    choice_tokens = {choice: tokenizer(choice, add_special_tokens=False, return_tensors="pt")["input_ids"].to(generator.model.device)
+                     for choice in choices}
     scores: dict[str, float] = {}
     with torch.inference_mode():
-        for choice in choices:
-            choice_ids = tokenizer(choice, add_special_tokens=False, return_tensors="pt")["input_ids"].to(generator.model.device)
-            full = torch.cat((prompt_ids, choice_ids), dim=1)
-            logits = generator.model(input_ids=full, use_cache=False).logits
-            start = prompt_ids.shape[1] - 1
-            token_logits = logits[:, start:start + choice_ids.shape[1], :]
-            log_probs = torch.log_softmax(token_logits, dim=-1)
-            selected = log_probs.gather(-1, choice_ids.unsqueeze(-1)).squeeze(-1)
-            scores[choice] = float(selected.mean().item())
-    return max(scores, key=scores.get)
+        if all(ids.shape[1] == 1 for ids in choice_tokens.values()):
+            logits = generator.model(input_ids=prompt_ids, use_cache=False).logits[:, -1, :]
+            log_probs = torch.log_softmax(logits, dim=-1)
+            for choice, ids in choice_tokens.items():
+                scores[choice] = round(float(log_probs[0, ids[0, 0]].item()), 4)
+        else:
+            for choice, choice_ids in choice_tokens.items():
+                full = torch.cat((prompt_ids, choice_ids), dim=1)
+                logits = generator.model(input_ids=full, use_cache=False).logits
+                start = prompt_ids.shape[1] - 1
+                token_logits = logits[:, start:start + choice_ids.shape[1], :]
+                log_probs = torch.log_softmax(token_logits, dim=-1)
+                selected = log_probs.gather(-1, choice_ids.unsqueeze(-1)).squeeze(-1)
+                scores[choice] = round(float(selected.mean().item()), 4)
+    ordered = sorted(scores, key=scores.get, reverse=True)
+    margin = round(scores[ordered[0]] - scores[ordered[1]], 4) if len(ordered) > 1 else float("inf")
+    return ChoiceScores(ordered[0], scores, margin)
 
 
 class TransformersGraniteGenerator:

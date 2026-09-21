@@ -8,7 +8,7 @@ from typing import Any
 
 from .contracts import CallerAction, ToolCaller, TranscriptSegment
 from .controller import ContextController
-from .tools import TOOL_SCHEMAS, validate_call
+from .tools import TOOL_SCHEMAS, normalize_calculator_expression, validate_call, validate_grounding
 
 
 class ConversationRouter:
@@ -34,6 +34,13 @@ class ConversationRouter:
         if action.kind in {"call", "amend"}:
             try:
                 args = validate_call(action.tool or "", action.arguments, self.schemas)
+                raw_args = dict(args)
+                validate_grounding(action.tool or "", raw_args, segment.text)
+                if action.tool == "calculator":
+                    args["expression"] = normalize_calculator_expression(args["expression"])
+                if args != raw_args:
+                    self.controller.log.write("call_normalized", tool=action.tool,
+                                              raw_arguments=raw_args, arguments=args)
                 if action.tool not in self.controller.tools:
                     raise ValueError("tool has no implementation")
                 if action.kind == "amend":
@@ -46,6 +53,8 @@ class ConversationRouter:
                 self._pending[request_id] = segment.text
                 return CallerAction(action.kind, action.tool, args, request_id, raw=action.raw)
             except (ValueError, TypeError) as exc:
+                self.controller.log.write("call_rejected", tool=action.tool,
+                                          arguments=dict(action.arguments), reason=str(exc))
                 return CallerAction("clarify", message=str(exc), raw=action.raw)
         if action.kind == "cancel":
             if not action.request_id or action.request_id not in self._pending:

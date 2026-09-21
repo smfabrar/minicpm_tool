@@ -31,7 +31,7 @@ Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite
 """)
 
 code("""# 1 — The only line to edit when selecting a newer tested release.
-SOURCE_REF = 'v0.1.7'
+SOURCE_REF = 'v0.1.8'
 print('Selected release:', SOURCE_REF)
 """)
 
@@ -95,7 +95,8 @@ import duplex_tools.caller as caller_module
 importlib.reload(caller_module)
 from duplex_tools.caller import GraniteToolCaller, TransformersGraniteGenerator
 from duplex_tools.contracts import TranscriptSegment
-from duplex_tools.tools import TOOL_SCHEMAS, validate_call
+from duplex_tools.tools import (TOOL_SCHEMAS, normalize_calculator_expression,
+                                validate_call, validate_grounding)
 
 if 'generator' not in globals():
     generator = TransformersGraniteGenerator(device='cpu')
@@ -112,13 +113,30 @@ for case in cases:
         parsed_args = validate_call(action.tool or '', action.arguments) if action.kind == 'call' else {}
     except ValueError:
         parsed_args = {}
+    canonical_args = dict(parsed_args)
+    grounded = True
+    if action.kind == 'call':
+        try:
+            validate_grounding(action.tool or '', parsed_args, case['text'])
+            if action.tool == 'calculator':
+                canonical_args['expression'] = normalize_calculator_expression(parsed_args['expression'])
+        except (KeyError, ValueError):
+            grounded = False
     args_match = parsed_args == expected_args or (
         case['id'] == 'calculator' and parsed_args.get('expression', '').replace(' ', '') == expected_args.get('expression', '').replace(' ', '')
     )
-    passed = action.kind == case['kind'] and (expected_tool is None or action.tool == expected_tool) and (expected_tool is None or args_match)
+    canonical_match = canonical_args == expected_args or (
+        case['id'] == 'calculator' and canonical_args.get('expression', '').replace(' ', '') == expected_args.get('expression', '').replace(' ', '')
+    )
+    route_pass = action.kind == case['kind'] and (expected_tool is None or action.tool == expected_tool)
+    passed = route_pass and (expected_tool is None or args_match)
     rows.append({'id': case['id'], 'expected': case['kind'], 'actual': action.kind,
                  'tool': action.tool, 'arguments': dict(action.arguments),
-                 'passed': passed, 'latency_s': round(time.perf_counter() - start, 2), 'raw': action.raw})
+                 'canonical_arguments': canonical_args, 'route_pass': route_pass,
+                 'raw_arguments_pass': None if expected_tool is None else args_match,
+                 'canonical_arguments_pass': None if expected_tool is None else canonical_match,
+                 'grounded': grounded, 'passed': passed,
+                 'latency_s': round(time.perf_counter() - start, 2), 'raw': action.raw})
 for row in rows:
     print(json.dumps(row, ensure_ascii=False))
 print('Fully correct:', sum(r['passed'] for r in rows), '/', len(rows))

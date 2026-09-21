@@ -6,7 +6,7 @@ This repository extracts the reusable tool path from the MiniCPM experiments int
 
 Open [`notebooks/kaggle_duplex_tools.ipynb`](notebooks/kaggle_duplex_tools.ipynb) in Kaggle. Enable Internet. Set `SOURCE_REF` in the first code cell and run the CPU phase. After enabling a GPU and Kaggle restarts the runtime, rerun the tag and setup cells. The GPU phase builds the pinned patched `llama.cpp-omni`, locates or downloads the audio-only GGUF modules, starts the server, and opens a password-protected microphone UI. Ask about the robotics seminar and listen for **B742**. The UI records the transcript, selected action, HTTP submission, model text, audio file, and your listening verdict.
 
-The notebook clones this repository over HTTPS at tag `v0.1.7`; Kaggle needs no SSH key. A Kaggle Dataset containing the required GGUF folder can be attached to save GPU-time downloads. The fallback downloads the official modules from Hugging Face. The caller and speech recognizer run on CPU in the GPU phase, leaving VRAM for MiniCPM.
+The notebook clones this repository over HTTPS at tag `v0.1.8`; Kaggle needs no SSH key. A Kaggle Dataset containing the required GGUF folder can be attached to save GPU-time downloads. The fallback downloads the official modules from Hugging Face. The caller and speech recognizer run on CPU in the GPU phase, leaving VRAM for MiniCPM.
 
 The microphone UI records one turn at a time. It is a human gate for real tool selection and spoken response in a persistent session. It does not establish continuous full-duplex overlap. `context_submitted` means HTTP prefill accepted the payload; the runtime HTTP API has no evaluation acknowledgement. The trace therefore says `evaluation: unknown`.
 
@@ -37,6 +37,8 @@ The schema validator allows exactly one required string field per tool and rejec
 The MiniCPM patch targets `tc-mb/llama.cpp-omni` commit `64d092c60db4b4ee45768476bd752f03fdcc98ea`. The patch includes the existing server initialization changes required for audio-only startup and the `next_cnt` response. It applies cleanly to a pristine pinned checkout and the resulting runtime builds locally. See [`EVIDENCE.md`](EVIDENCE.md) for the earlier context-injection observation. No MiniCPM source or weights are committed here.
 
 The first extraction does not yet have a live streaming microphone loop, incremental SSE playback, native KV evaluation acknowledgement, or a human correction while a tool runs. Those require the subsequent integration and overlap stages. The checked-in notebook is prepared and syntax-checked locally; its GPU and microphone cells must be run in Kaggle to establish the human result.
+
+The observed Granite pilot failures, safety boundaries, and measurement policy are recorded in [`docs/caller_failure_analysis.md`](docs/caller_failure_analysis.md).
 
 ## Primary references
 

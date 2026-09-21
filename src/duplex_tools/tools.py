@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import ast
 import operator
+import re
 from dataclasses import dataclass
 from typing import Any, Mapping, Protocol
 
@@ -41,6 +42,36 @@ def validate_call(tool: str, arguments: Mapping[str, Any], schemas: list[dict[st
             raise ValueError(f"{key} must be a non-empty string of at most 240 characters")
         result[key] = value.strip()
     return result
+
+
+def normalize_calculator_expression(expression: str) -> str:
+    """Map common spoken operators to the calculator's explicit grammar."""
+    normalized = " ".join(expression.casefold().split())
+    replacements = (
+        (r"\bmultiplied by\b", "*"),
+        (r"\bdivided by\b", "/"),
+        (r"\btimes\b", "*"),
+        (r"\bplus\b", "+"),
+        (r"\bminus\b", "-"),
+    )
+    for pattern, symbol in replacements:
+        normalized = re.sub(pattern, symbol, normalized)
+    normalized = re.sub(r"\s*([()+*/-])\s*", r" \1 ", normalized)
+    normalized = " ".join(normalized.split())
+    if not re.fullmatch(r"[\d\s.()+*/-]+", normalized):
+        raise ValueError("calculator expression contains unsupported words or symbols")
+    return normalized
+
+
+def validate_grounding(tool: str, arguments: Mapping[str, str], transcript: str) -> None:
+    """Reject entity/query text invented by a caller rather than heard from the user."""
+    heard = " ".join(re.findall(r"[a-z0-9]+", transcript.casefold()))
+    key = {"room_lookup": "name", "document_search": "query"}.get(tool)
+    if key is None:
+        return
+    proposed = " ".join(re.findall(r"[a-z0-9]+", arguments[key].casefold()))
+    if not proposed or proposed not in heard:
+        raise ValueError(f"{tool} argument is not grounded in the committed transcript")
 
 
 class RoomLookup:
