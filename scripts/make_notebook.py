@@ -35,7 +35,7 @@ from pathlib import Path
 import subprocess, sys
 
 ROOT = Path('/kaggle/working/minicpm_tool')
-SOURCE_REF = 'v0.1.5'
+SOURCE_REF = 'v0.1.6'
 if not ROOT.exists():
     subprocess.run(['git', 'clone', '--depth', '1', '--branch', SOURCE_REF,
                     'https://github.com/smfabrar/minicpm_tool.git', str(ROOT)], check=True)

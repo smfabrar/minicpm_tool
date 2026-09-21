@@ -129,7 +129,7 @@ def score_choice(generator: Any, messages: list[dict[str, str]], choices: list[s
         for choice in choices:
             choice_ids = tokenizer(choice, add_special_tokens=False, return_tensors="pt")["input_ids"].to(generator.model.device)
             full = torch.cat((prompt_ids, choice_ids), dim=1)
-            logits = generator.model(input_ids=full).logits
+            logits = generator.model(input_ids=full, use_cache=False).logits
             start = prompt_ids.shape[1] - 1
             token_logits = logits[:, start:start + choice_ids.shape[1], :]
             log_probs = torch.log_softmax(token_logits, dim=-1)
