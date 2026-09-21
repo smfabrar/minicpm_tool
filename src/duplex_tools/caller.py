@@ -166,7 +166,11 @@ class TransformersGraniteGenerator:
 
         self.torch = torch
         self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self.model = AutoModelForCausalLM.from_pretrained(model_id).to(device)
+        self.model = AutoModelForCausalLM.from_pretrained(model_id)
+        if str(device).startswith("cuda"):
+            self.model = self.model.to(device=device, dtype=torch.float16)
+        else:
+            self.model = self.model.to(device)
         self.model.eval()
 
     def __call__(self, messages: list[dict[str, str]], tools: list[dict[str, Any]]) -> str:

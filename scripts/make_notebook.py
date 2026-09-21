@@ -25,13 +25,13 @@ This notebook pulls the adapter package from `smfabrar/minicpm_tool`. It has two
 
 Enable **Internet** in Kaggle Settings. The first code cell contains only `SOURCE_REF`; changing that one tag and rerunning cells 1–2 updates the package. Adding a GPU restarts the notebook runtime, so Python objects from phase A disappear. After the restart rerun cells 1–2 and continue at the GPU section. Skip the CPU benchmark on the GPU clock. An attached Kaggle Dataset containing the GGUF folder saves download time; the model download cell is a fallback.
 
-The voice gate is push-to-talk: record a turn, send it, then listen. It tests a real model-selected tool and a spoken answer in one MiniCPM session. It does not yet demonstrate continuous simultaneous recording and playback. The HTTP API reports context submission; actual KV evaluation remains **unknown** without a native acknowledgement.
+The voice gate is push-to-talk: record a turn, send it, then listen. It tests a real model-selected tool and a spoken answer in one MiniCPM session. It does not yet demonstrate continuous simultaneous recording and playback. The HTTP API reports context submission; actual KV evaluation remains **unknown** without a native acknowledgement. In the GPU phase, Whisper Tiny and Granite 350M use GPU 1 in FP16 while the native MiniCPM runtime can use both GPUs.
 
 Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite model card](https://huggingface.co/ibm-granite/granite-4.0-350m), [Granite tool format](https://github.com/ibm-granite/granite-4.0-language-models/blob/main/Granite%204.0%20Prompt%20engineering%20guide%20v2.md), [MiniCPM GGUF modules](https://huggingface.co/openbmb/MiniCPM-o-4_5-gguf).
 """)
 
 code("""# 1 — The only line to edit when selecting a newer tested release.
-SOURCE_REF = 'v0.1.15'
+SOURCE_REF = 'v0.1.16'
 print('Selected release:', SOURCE_REF)
 """)
 
@@ -167,7 +167,7 @@ print('Raw model output:', proposal.raw)
 
 md("""## CPU work is complete; enable the GPU
 
-Proceed when **GPU experiment readiness** reports PASS. Perfect raw caller accuracy is not an admission condition: raw mistakes remain experimental results, while the admission check asks whether intended calls are executable and unintended proposals are stopped before execution. In Kaggle Settings select **Accelerator → GPU**. Kaggle restarts the runtime. Rerun **cells 1–2**, then continue below. Phase B needs CUDA for MiniCPM. The 350M caller and tiny speech recognizer stay on CPU so the GPU is reserved for MiniCPM. If the GPU has too little memory, reduce `N_GPU_LAYERS` in the server cell and record the value and resulting latency.
+Proceed when **GPU experiment readiness** reports PASS. Perfect raw caller accuracy is not an admission condition: raw mistakes remain experimental results, while the admission check asks whether intended calls are executable and unintended proposals are stopped before execution. In Kaggle Settings select **Accelerator → GPU**. Kaggle restarts the runtime. Rerun **cells 1–2**, then continue below. Phase B needs CUDA for MiniCPM. The 350M caller and tiny speech recognizer use the second GPU in FP16 during the human experiment. If the GPU has too little memory, reduce `N_GPU_LAYERS` in the server cell and record the value and resulting latency.
 """)
 
 code("""# 7 — GPU phase: verify the accelerator and install only the voice dependencies.
@@ -339,13 +339,18 @@ tools = {
                                        'Lab access': 'The lab is open Monday through Friday from 9 to 17.'}),
 }
 controller = ContextController(tools, log=JsonlEventLog(OUTPUT / 'controller.jsonl'))
-router = ConversationRouter(GraniteToolCaller(TransformersGraniteGenerator(device='cpu')), controller)
-recognizer = WhisperModel('tiny.en', device='cpu', compute_type='int8')
+AUX_GPU = 1 if torch.cuda.device_count() > 1 else 0
+AUX_DEVICE = f'cuda:{AUX_GPU}'
+router = ConversationRouter(GraniteToolCaller(TransformersGraniteGenerator(device=AUX_DEVICE)), controller)
+recognizer = WhisperModel('tiny.en', device='cuda', device_index=AUX_GPU, compute_type='float16')
 session = MiniCPMStreamSession(OmniHttpClient(BASE_URL, timeout_s=600), controller)
 print(await session.initialize(output_dir=str(OUTPUT), model_dir=str(MODEL_DIR),
                                tts_bin_dir=str(MODEL_DIR / 'tts'), token2wav_device='gpu:0'))
-voice_demo = VoiceDemo(session, router, OUTPUT, recognizer)
+voice_demo = VoiceDemo(session, router, OUTPUT, recognizer,
+                       transcription_backend=f'Whisper Tiny FP16 on {AUX_DEVICE}',
+                       routing_backend=f'Granite 350M FP16 on {AUX_DEVICE}')
 print('Adapter capabilities:', session.capabilities())
+print('Auxiliary inference device:', AUX_DEVICE)
 """)
 
 code("""# 13 — Human voice gate. The Gradio share URL is public; this one has a random password.
@@ -355,6 +360,8 @@ app = make_gradio_ui(voice_demo)
 app.launch(share=True, auth=('tester', password), inline=False, prevent_thread_lock=True)
 print('Gradio username: tester')
 print('Gradio password:', password)
+print('Send returns immediately; the page polls the persistent background turn once per second.')
+print('Recovery snapshot:', OUTPUT / 'latest_turn.json')
 """)
 
 md("""## Human test procedure
@@ -363,6 +370,8 @@ md("""## Human test procedure
 2. Ask **“What is 17 times 23?”** Listen for **391**. Inspect the exact expression chosen; an incorrect argument is a caller failure even if the speech sounds plausible.
 3. Ask for the **thesis deadline**, then try an ordinary greeting. The greeting should make no tool call.
 4. Repeat with your own paraphrases. Save a verdict after listening to every answer. Logs are in `/kaggle/working/duplex_voice_output/` as `human_trials.jsonl`, `human_verdicts.jsonl`, and `controller.jsonl`.
+
+`Send turn` starts a persistent background job and returns immediately. The page polls it once per second with short non-queued requests, so the experiment can continue if the public Gradio connection briefly drops. `latest_turn.json` is rewritten after each stage and preserves the current transcript, status, error, and final result. If the page reconnects, the poller restores the latest result. The Granite router has a 90-second deadline; crossing it records a failed trial rather than leaving an unbounded spinner. The stage text records the GPU used by Whisper and Granite.
 
 The model input counter and session stay live across all turns. `evaluation: unknown` means the HTTP prefill accepted the context but did not confirm token evaluation. Generated text and the audio file are recorded separately; the listening verdict is the spoken-answer ground truth. A missing or incorrect answer is a failed trial, not something to infer away from the tool trace.
 
