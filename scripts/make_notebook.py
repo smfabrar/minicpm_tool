@@ -31,7 +31,7 @@ Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite
 """)
 
 code("""# 1 — The only line to edit when selecting a newer tested release.
-SOURCE_REF = 'v0.1.14'
+SOURCE_REF = 'v0.1.15'
 print('Selected release:', SOURCE_REF)
 """)
 
@@ -208,6 +208,20 @@ print('Model directory:', MODEL_DIR)
 code("""# 9 — Restore a saved T4 runtime, or build the pinned runtime once.
 import shutil
 from duplex_tools.runtime_bundle import verify_runtime_bundle
+
+# Rerunning this cell intentionally ends the current conversation before
+# repairing or replacing its native runtime. Retain files and build objects.
+if 'server_process' in globals() and server_process.poll() is None:
+    server_process.terminate()
+    try:
+        server_process.wait(timeout=10)
+    except subprocess.TimeoutExpired:
+        server_process.kill()
+        server_process.wait(timeout=10)
+    print('Stopped previous MiniCPM server.')
+if 'app' in globals():
+    app.close()
+    print('Closed previous Gradio interface.')
 
 # Future sessions: attach the saved notebook output and set this directory.
 # Example: '/kaggle/input/YOUR-NOTEBOOK-OUTPUT/minicpm_omni_runtime_sm75'
