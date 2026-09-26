@@ -143,7 +143,12 @@ class ContextController:
 
     async def wait_all(self) -> None:
         while self._tasks:
-            await asyncio.gather(*tuple(self._tasks), return_exceptions=True)
+            # A task's done callback is scheduled with call_soon. Gathering an
+            # already-finished task returns immediately, so relying only on the
+            # callback can spin without giving that callback a turn.
+            tasks = tuple(self._tasks)
+            await asyncio.gather(*tasks, return_exceptions=True)
+            self._tasks.difference_update(task for task in tasks if task.done())
 
     def reserve_injection(self, boundary: Boundary, *, model_idle: bool = True) -> ContextEvent | None:
         event = self.scheduler.reserve(boundary, model_idle=model_idle)

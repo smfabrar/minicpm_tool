@@ -9,6 +9,16 @@ from duplex_tools.tools import LocalLookup
 
 
 class ControllerTests(unittest.IsolatedAsyncioTestCase):
+    async def test_wait_all_removes_an_already_finished_task(self) -> None:
+        controller = ContextController({})
+        finished = asyncio.create_task(asyncio.sleep(0))
+        await finished
+        # Reproduce the interval where a task is done but its scheduled discard
+        # callback has not removed it from the controller set.
+        controller._tasks.add(finished)
+        await asyncio.wait_for(controller.wait_all(), timeout=0.1)
+        self.assertFalse(controller._tasks)
+
     async def test_tool_work_does_not_block_caller_and_result_is_injected(self) -> None:
         controller = ContextController(
             {"local_lookup": LocalLookup({"room": "The room is B742."})}

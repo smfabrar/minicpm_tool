@@ -31,7 +31,7 @@ Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite
 """)
 
 code("""# 1 — The only line to edit when selecting a newer tested release.
-SOURCE_REF = 'v0.1.16'
+SOURCE_REF = 'v0.1.17'
 print('Selected release:', SOURCE_REF)
 """)
 
@@ -305,7 +305,8 @@ if 'server_process' not in globals() or server_process.poll() is not None:
         str(SERVER_BIN), '--host', '127.0.0.1', '--port', str(SERVER_PORT),
         '--model', str(MODEL_DIR / 'MiniCPM-o-4_5-Q4_K_M.gguf'),
         '-ngl', str(N_GPU_LAYERS), '--ctx-size', '8192',
-    ], stdout=server_log_handle, stderr=subprocess.STDOUT, env=SERVER_ENV)
+    ], stdout=server_log_handle, stderr=subprocess.STDOUT, env=SERVER_ENV,
+       start_new_session=True)
 for _ in range(120):
     if server_process.poll() is not None:
         raise RuntimeError(SERVER_LOG.read_text()[-4000:])
