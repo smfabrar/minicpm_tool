@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import shutil
+import threading
 import time
 import uuid
 from datetime import datetime, timezone
@@ -32,23 +33,56 @@ class VoiceDemo:
         self.last_trial_id: str | None = None
         self.turn_lock = asyncio.Lock()
         self._jobs: dict[str, dict] = {}
-        self._job_tasks: dict[str, asyncio.Task] = {}
+        self._job_tasks: dict[str, object] = {}
         self._latest_job_id: str | None = None
+        self._state_lock = threading.RLock()
+        self._worker_loop = asyncio.new_event_loop()
+        self._worker_thread = threading.Thread(
+            target=self._worker_main,
+            name="duplex-voice-worker",
+            daemon=True,
+        )
+        self._worker_thread.start()
         self.output_dir.mkdir(parents=True, exist_ok=True)
 
+    def _worker_main(self) -> None:
+        asyncio.set_event_loop(self._worker_loop)
+        self._worker_loop.run_forever()
+        pending = asyncio.all_tasks(self._worker_loop)
+        for task in pending:
+            task.cancel()
+        if pending:
+            self._worker_loop.run_until_complete(
+                asyncio.gather(*pending, return_exceptions=True)
+            )
+        self._worker_loop.close()
+
+    def close(self) -> None:
+        """Cancel pending work and stop the demo-owned event loop."""
+        with self._state_lock:
+            futures = tuple(self._job_tasks.values())
+        for future in futures:
+            future.cancel()
+        if self._worker_loop.is_running():
+            self._worker_loop.call_soon_threadsafe(self._worker_loop.stop)
+        if self._worker_thread.is_alive():
+            self._worker_thread.join(timeout=5)
+
     def _publish_job(self, job_id: str, **fields) -> None:
-        job = self._jobs[job_id]
-        job.update(fields)
-        snapshot = {key: value for key, value in job.items() if key != "started_monotonic"}
-        temporary = self.output_dir / "latest_turn.json.tmp"
-        temporary.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
-        temporary.replace(self.output_dir / "latest_turn.json")
+        with self._state_lock:
+            job = self._jobs[job_id]
+            job.update(fields)
+            snapshot = {key: value for key, value in job.items() if key != "started_monotonic"}
+            temporary = self.output_dir / "latest_turn.json.tmp"
+            temporary.write_text(json.dumps(snapshot, indent=2), encoding="utf-8")
+            temporary.replace(self.output_dir / "latest_turn.json")
 
     def _job_outputs(self, job_id: str | None = None) -> tuple[str, str, str, str | None]:
-        selected = job_id or self._latest_job_id
-        if selected is None or selected not in self._jobs:
-            return "Ready to record.", "", "{}", None
-        job = self._jobs[selected]
+        with self._state_lock:
+            selected = job_id or self._latest_job_id
+            if selected is None or selected not in self._jobs:
+                return "Ready to record.", "", "{}", None
+            job = dict(self._jobs[selected])
         elapsed = time.monotonic() - job["started_monotonic"]
         status = f"{job['status']}: {job['stage']} ({elapsed:.1f}s)"
         trace = job.get("trace") or json.dumps(
@@ -66,29 +100,36 @@ class VoiceDemo:
         """Start a turn quickly so a public UI tunnel need not stay connected."""
         if not audio_path:
             return "Record speech first.", "", "{}", None
-        if self._latest_job_id is not None:
-            current = self._jobs[self._latest_job_id]
-            if current["status"] == "running":
-                return self._job_outputs(self._latest_job_id)
+        with self._state_lock:
+            current_id = self._latest_job_id
+            if current_id is not None and self._jobs[current_id]["status"] == "running":
+                return self._job_outputs(current_id)
         job_id = uuid.uuid4().hex[:12]
         saved_input = self.output_dir / f"submitted_{job_id}.wav"
         shutil.copy2(audio_path, saved_input)
-        self._jobs[job_id] = {
-            "job_id": job_id,
-            "status": "running",
-            "stage": "Queued in the persistent MiniCPM session",
-            "transcript": "",
-            "trace": "",
-            "audio": None,
-            "error": None,
-            "started_at": datetime.now(timezone.utc).isoformat(),
-            "started_monotonic": time.monotonic(),
-        }
-        self._latest_job_id = job_id
+        with self._state_lock:
+            self._jobs[job_id] = {
+                "job_id": job_id,
+                "status": "running",
+                "stage": "Queued in the persistent MiniCPM session",
+                "transcript": "",
+                "trace": "",
+                "audio": None,
+                "error": None,
+                "started_at": datetime.now(timezone.utc).isoformat(),
+                "started_monotonic": time.monotonic(),
+            }
+            self._latest_job_id = job_id
         self._publish_job(job_id)
-        task = asyncio.create_task(self._run_job(job_id, str(saved_input)))
-        self._job_tasks[job_id] = task
-        task.add_done_callback(lambda _: self._job_tasks.pop(job_id, None))
+        future = asyncio.run_coroutine_threadsafe(
+            self._run_job(job_id, str(saved_input)), self._worker_loop
+        )
+        with self._state_lock:
+            self._job_tasks[job_id] = future
+        def remove_job(_):
+            with self._state_lock:
+                self._job_tasks.pop(job_id, None)
+        future.add_done_callback(remove_job)
         return self._job_outputs(job_id)
 
     async def _run_job(self, job_id: str, audio_path: str) -> None:

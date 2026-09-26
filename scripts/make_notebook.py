@@ -31,7 +31,7 @@ Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite
 """)
 
 code("""# 1 — The only line to edit when selecting a newer tested release.
-SOURCE_REF = 'v0.1.17'
+SOURCE_REF = 'v0.1.18'
 print('Selected release:', SOURCE_REF)
 """)
 
@@ -222,6 +222,9 @@ if 'server_process' in globals() and server_process.poll() is None:
 if 'app' in globals():
     app.close()
     print('Closed previous Gradio interface.')
+if 'voice_demo' in globals():
+    voice_demo.close()
+    print('Stopped previous voice worker.')
 
 # Future sessions: attach the saved notebook output and set this directory.
 # Example: '/kaggle/input/YOUR-NOTEBOOK-OUTPUT/minicpm_omni_runtime_sm75'
