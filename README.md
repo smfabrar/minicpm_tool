@@ -6,9 +6,13 @@ This repository extracts the reusable tool path from the MiniCPM experiments int
 
 Open [`notebooks/kaggle_duplex_tools.ipynb`](notebooks/kaggle_duplex_tools.ipynb) in Kaggle. Enable Internet. Set `SOURCE_REF` in the first code cell and run the CPU phase. After enabling a GPU and Kaggle restarts the runtime, rerun the tag and setup cells. The GPU phase builds the pinned patched `llama.cpp-omni`, locates or downloads the audio-only GGUF modules, starts the server, and opens a password-protected microphone UI. Ask about the robotics seminar and listen for **B742**. The UI records the transcript, selected action, HTTP submission, model text, audio file, and your listening verdict.
 
-The notebook clones this repository over HTTPS at tag `v0.1.18`; Kaggle needs no SSH key. A Kaggle Dataset containing the required GGUF folder can be attached to save GPU-time downloads. The fallback downloads the official modules from Hugging Face. During the human experiment, Granite 350M and Whisper Tiny run in FP16 on GPU 1 while the native MiniCPM runtime can use both GPUs.
+The notebook clones this repository over HTTPS at tag `v0.1.19`; Kaggle needs no SSH key. A Kaggle Dataset containing the required GGUF folder can be attached to save GPU-time downloads. The fallback downloads the official modules from Hugging Face. During the human experiment, Granite 350M and Whisper Tiny run in FP16 on GPU 1 while the native MiniCPM runtime can use both GPUs.
 
-The human UI submits each turn to a dedicated event-loop thread owned by the voice adapter and polls it with short requests. This keeps a long MiniCPM turn independent of both the public Gradio queue connection and Gradio's request-loop lifecycle. Its latest stage and result are also written to `duplex_voice_output/latest_turn.json`. Granite routing has a 90-second deadline so a stalled caller is recorded as an experimental failure.
+The human UI submits each turn to a dedicated event-loop thread owned by the voice adapter and polls it with short requests. This keeps a long MiniCPM turn independent of both the public Gradio queue connection and Gradio's request-loop lifecycle. Its latest stage and result are also written to the current run's `latest_turn.json`. Granite routing has a 90-second deadline so a stalled caller is recorded as an experimental failure.
+
+The 2026-09-26 human run is analyzed in [`docs/human_run_2026-09-26.md`](docs/human_run_2026-09-26.md). It showed successful tool selection, execution, and context submission, but assistant speech often preceded the current result and later turns repeated earlier answers. The new voice path logs text before and after submission separately and continues a bounded number of silence input units after delivery. A current-turn answer must appear after the current result and be confirmed by the listener. These changes still require a fresh Kaggle voice run; local tests only verify the ordering and trace logic.
+
+Each native server start now gets a unique directory under `/kaggle/working/duplex_voice_runs/` with a manifest, server log, submitted recordings, context log, TTS chunks, combined audio, and verdicts. Notebook cell 14 stops the writers and creates one downloadable ZIP for that run. The trial ID is shared across the submitted recording, trace, combined audio, and listening verdict. Declared `room_lookup` aliases handle the observed Whisper transcription “robotic seminar” while preserving the canonical room source.
 
 The controller explicitly removes completed tool tasks after waiting for them, avoiding an event-loop spin if a scheduled done callback has not run yet. The Kaggle server starts in its own process session, so interrupting an unrelated notebook cell does not propagate SIGINT to the initialized native runtime.
 
@@ -43,7 +47,7 @@ The microphone UI records one turn at a time. It is a human gate for real tool s
 | `caller.py` | Granite native `<tool_call>` parsing and optional Transformers backend |
 | `minicpm_client.py` | Persistent serialized HTTP session, monotonic counter, context attached at an audio boundary |
 | `simulated.py` | Capability-controlled contract test adapter |
-| `voice_demo.py` | Human microphone, CPU transcription, audio chunking, trace, listening verdict |
+| `voice_demo.py` | Human microphone, transcription, audio chunking, result timing trace, listening verdict |
 
 Core installation and tests use no model dependencies:
 

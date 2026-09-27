@@ -123,6 +123,14 @@ class CallerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             normalize_calculator_expression("open the calculator")
 
+    def test_declared_room_alias_keeps_canonical_source(self):
+        import asyncio
+        lookup = RoomLookup({"robotics seminar": "The room is B742."},
+                            aliases={"robotic seminar": "robotics seminar"})
+        result = asyncio.run(lookup({"name": "robotic seminar"}))
+        self.assertEqual(result.facts, "The room is B742.")
+        self.assertEqual(result.sources, ("local://rooms/robotics seminar",))
+
 
 if __name__ == "__main__":
     unittest.main()

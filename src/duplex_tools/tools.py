@@ -75,13 +75,17 @@ def validate_grounding(tool: str, arguments: Mapping[str, str], transcript: str)
 
 
 class RoomLookup:
-    def __init__(self, records: Mapping[str, str]) -> None:
+    def __init__(self, records: Mapping[str, str], *, aliases: Mapping[str, str] | None = None) -> None:
         self.records = {key.casefold(): value for key, value in records.items()}
+        self.aliases = {key.casefold(): value.casefold() for key, value in (aliases or {}).items()}
+        if any(canonical not in self.records for canonical in self.aliases.values()):
+            raise ValueError("room alias must refer to a known room")
 
     async def __call__(self, arguments: Mapping[str, Any]) -> ToolResult:
-        key = str(arguments["name"]).strip().casefold()
+        spoken = str(arguments["name"]).strip().casefold()
+        key = self.aliases.get(spoken, spoken)
         if key not in self.records:
-            raise LookupError(f"room not found for {key!r}")
+            raise LookupError(f"room not found for {spoken!r}")
         return ToolResult(self.records[key], (f"local://rooms/{key}",))
 
 

@@ -31,7 +31,7 @@ Sources: [Kaggle notebooks](https://www.kaggle.com/docs/notebooks), [IBM Granite
 """)
 
 code("""# 1 — The only line to edit when selecting a newer tested release.
-SOURCE_REF = 'v0.1.18'
+SOURCE_REF = 'v0.1.19'
 print('Selected release:', SOURCE_REF)
 """)
 
@@ -211,6 +211,12 @@ from duplex_tools.runtime_bundle import verify_runtime_bundle
 
 # Rerunning this cell intentionally ends the current conversation before
 # repairing or replacing its native runtime. Retain files and build objects.
+if 'app' in globals():
+    app.close()
+    print('Closed previous Gradio interface.')
+if 'voice_demo' in globals():
+    voice_demo.close()
+    print('Stopped previous voice worker.')
 if 'server_process' in globals() and server_process.poll() is None:
     server_process.terminate()
     try:
@@ -219,12 +225,8 @@ if 'server_process' in globals() and server_process.poll() is None:
         server_process.kill()
         server_process.wait(timeout=10)
     print('Stopped previous MiniCPM server.')
-if 'app' in globals():
-    app.close()
-    print('Closed previous Gradio interface.')
-if 'voice_demo' in globals():
-    voice_demo.close()
-    print('Stopped previous voice worker.')
+if 'server_log_handle' in globals() and not server_log_handle.closed:
+    server_log_handle.close()
 
 # Future sessions: attach the saved notebook output and set this directory.
 # Example: '/kaggle/input/YOUR-NOTEBOOK-OUTPUT/minicpm_omni_runtime_sm75'
@@ -285,7 +287,8 @@ SERVER_ENV = runtime_environment(RUNTIME_BUNDLE)
 """)
 
 code("""# 11 — Start one persistent local MiniCPM server and wait for HTTP readiness.
-import socket, subprocess, time, urllib.request
+import socket, subprocess, time, urllib.request, secrets, hashlib, json
+from datetime import datetime, timezone
 
 N_GPU_LAYERS = 99
 def free_local_port(candidates=(19080, 18080, 9060, 8765, 49152)):
@@ -299,8 +302,11 @@ def free_local_port(candidates=(19080, 18080, 9060, 8765, 49152)):
             return candidate
     raise RuntimeError('No candidate localhost port is available')
 
-SERVER_LOG = Path('/kaggle/working/minicpm_server.log')
 if 'server_process' not in globals() or server_process.poll() is not None:
+    RUN_ID = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%SZ') + '_' + secrets.token_hex(3)
+    OUTPUT = Path('/kaggle/working/duplex_voice_runs') / RUN_ID
+    OUTPUT.mkdir(parents=True, exist_ok=False)
+    SERVER_LOG = OUTPUT / 'minicpm_server.log'
     SERVER_PORT = free_local_port()
     BASE_URL = f'http://127.0.0.1:{SERVER_PORT}'
     server_log_handle = SERVER_LOG.open('w')
@@ -310,6 +316,16 @@ if 'server_process' not in globals() or server_process.poll() is not None:
         '-ngl', str(N_GPU_LAYERS), '--ctx-size', '8192',
     ], stdout=server_log_handle, stderr=subprocess.STDOUT, env=SERVER_ENV,
        start_new_session=True)
+    manifest = {
+        'run_id': RUN_ID, 'started_at': datetime.now(timezone.utc).isoformat(),
+        'adapter_tag': SOURCE_REF,
+        'adapter_commit': subprocess.check_output(['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
+        'native_commit': PIN, 'context_patch_sha256': hashlib.sha256(patch.read_bytes()).hexdigest(),
+        'model_dir': str(MODEL_DIR), 'model_file': 'MiniCPM-o-4_5-Q4_K_M.gguf',
+        'gpu_names': [torch.cuda.get_device_name(i) for i in range(torch.cuda.device_count())],
+        'native_gpu_layers': N_GPU_LAYERS, 'server_port': SERVER_PORT,
+    }
+    (OUTPUT / 'run_manifest.json').write_text(json.dumps(manifest, indent=2) + '\\n')
 for _ in range(120):
     if server_process.poll() is not None:
         raise RuntimeError(SERVER_LOG.read_text()[-4000:])
@@ -322,6 +338,7 @@ for _ in range(120):
 else:
     raise TimeoutError('MiniCPM server did not become ready; inspect ' + str(SERVER_LOG))
 print('MiniCPM server is ready at', BASE_URL)
+print('Run output:', OUTPUT)
 """)
 
 code("""# 12 — Load CPU caller and recognizer once, then initialize MiniCPM once.
@@ -333,11 +350,11 @@ from duplex_tools.minicpm_client import MiniCPMStreamSession, OmniHttpClient
 from duplex_tools.tools import RoomLookup, SafeCalculator, DocumentSearch
 from duplex_tools.voice_demo import VoiceDemo, make_gradio_ui
 
-OUTPUT = Path('/kaggle/working/duplex_voice_output')
-OUTPUT.mkdir(exist_ok=True)
+assert OUTPUT.is_dir() and (OUTPUT / 'run_manifest.json').is_file()
 tools = {
     'room_lookup': RoomLookup({'robotics seminar': 'The robotics seminar is in room B742.',
-                               'vision seminar': 'The vision seminar is in room C314.'}),
+                               'vision seminar': 'The vision seminar is in room C314.'},
+                              aliases={'robotic seminar': 'robotics seminar'}),
     'calculator': SafeCalculator(),
     'document_search': DocumentSearch({'Thesis deadlines': 'The draft is due on October 15; the final copy is due on November 20.',
                                        'Lab access': 'The lab is open Monday through Friday from 9 to 17.'}),
@@ -348,8 +365,23 @@ AUX_DEVICE = f'cuda:{AUX_GPU}'
 router = ConversationRouter(GraniteToolCaller(TransformersGraniteGenerator(device=AUX_DEVICE)), controller)
 recognizer = WhisperModel('tiny.en', device='cuda', device_index=AUX_GPU, compute_type='float16')
 session = MiniCPMStreamSession(OmniHttpClient(BASE_URL, timeout_s=600), controller)
+REF_AUDIO = OUTPUT / 'default_ref_audio.wav'
+ref_source = UPSTREAM / 'tools/omni/assets/default_ref_audio/default_ref_audio.wav'
+if ref_source.is_file():
+    shutil.copy2(ref_source, REF_AUDIO)
+else:
+    reference_url = ('https://raw.githubusercontent.com/tc-mb/llama.cpp-omni/' + PIN +
+                     '/tools/omni/assets/default_ref_audio/default_ref_audio.wav')
+    urllib.request.urlretrieve(reference_url, REF_AUDIO)
+expected_ref_sha256 = 'cb8f06ba5080cdf548969138881fb8ad8b04e2516108f4e08ba0363b68b613ea'
+assert hashlib.sha256(REF_AUDIO.read_bytes()).hexdigest() == expected_ref_sha256, 'Reference audio differs from pinned source'
+manifest = json.loads((OUTPUT / 'run_manifest.json').read_text())
+manifest['reference_audio_sha256'] = expected_ref_sha256
+manifest['auxiliary_device'] = AUX_DEVICE
+(OUTPUT / 'run_manifest.json').write_text(json.dumps(manifest, indent=2) + '\\n')
 print(await session.initialize(output_dir=str(OUTPUT), model_dir=str(MODEL_DIR),
-                               tts_bin_dir=str(MODEL_DIR / 'tts'), token2wav_device='gpu:0'))
+                               tts_bin_dir=str(MODEL_DIR / 'tts'), voice_audio=str(REF_AUDIO),
+                               token2wav_device='gpu:0'))
 voice_demo = VoiceDemo(session, router, OUTPUT, recognizer,
                        transcription_backend=f'Whisper Tiny FP16 on {AUX_DEVICE}',
                        routing_backend=f'Granite 350M FP16 on {AUX_DEVICE}')
@@ -373,11 +405,13 @@ md("""## Human test procedure
 1. In the Gradio page, record **“Where is the robotics seminar?”** Send it. Check the user transcript, that the proposal names `room_lookup`, the submitted event in the trace, and listen for **B742**.
 2. Ask **“What is 17 times 23?”** Listen for **391**. Inspect the exact expression chosen; an incorrect argument is a caller failure even if the speech sounds plausible.
 3. Ask for the **thesis deadline**, then try an ordinary greeting. The greeting should make no tool call.
-4. Repeat with your own paraphrases. Save a verdict after listening to every answer. Logs are in `/kaggle/working/duplex_voice_output/` as `human_trials.jsonl`, `human_verdicts.jsonl`, and `controller.jsonl`.
+4. Repeat with your own paraphrases. Save a verdict after listening to every answer. Logs are in the printed `OUTPUT` run directory as `human_trials.jsonl`, `human_verdicts.jsonl`, and `controller.jsonl`.
 
 `Send turn` starts a persistent background job and returns immediately. The page polls it once per second with short non-queued requests, so the experiment can continue if the public Gradio connection briefly drops. `latest_turn.json` is rewritten after each stage and preserves the current transcript, status, error, and final result. If the page reconnects, the poller restores the latest result. The Granite router has a 90-second deadline; crossing it records a failed trial rather than leaving an unbounded spinner. The stage text records the GPU used by Whisper and Granite.
 
-The model input counter and session stay live across all turns. `evaluation: unknown` means the HTTP prefill accepted the context but did not confirm token evaluation. Generated text and the audio file are recorded separately; the listening verdict is the spoken-answer ground truth. A missing or incorrect answer is a failed trial, not something to infer away from the tool trace.
+The model input counter and session stay live across all turns. `evaluation: unknown` means the HTTP prefill accepted the context but did not confirm token evaluation. The trace separates `pre_result_text` from `post_result_text` and records every text fragment's counter. Only an answer after the current result can support the current tool trial. A returned audio file may still contain earlier speech, so inspect `audio_attribution` and listen before saving a verdict. The trial ID matches the submitted recording and returned audio.
+
+After a result is submitted, the adapter sends up to eight one-second silence units, decoding after each. These are protocol input units processed quickly on the GPU, not eight seconds of real-time waiting. The trace records whether a post-result end-of-turn was seen. A run that reaches the limit without a post-result answer is an observed failure, not a successful tool answer.
 
 The microphone gate records complete turns. Correction or cancellation during an actively running tool, overlapping speech, and live incremental playback remain the next human gates after this first extraction.
 
@@ -386,6 +420,31 @@ The microphone gate records complete turns. Correction or cancellation during an
 After completing the human trials, choose **Save Version → Quick Save** and include the current output files. Kaggle preserves files under `/kaggle/working` up to its output limit. In a later notebook, use **Add Input**, attach this notebook's saved output, and set `ATTACHED_RUNTIME_DIR` in cell 9 to the attached `minicpm_omni_runtime_sm75` directory. Cell 9 verifies the source commit, patch hash, every bundled file, the T4 `sm_75` architecture, and dynamic system libraries before skipping compilation.
 
 The bundle intentionally excludes model weights and Kaggle system libraries. Keep model weights in their own Kaggle Dataset. CUDA, glibc, OpenSSL, and other host libraries are recorded in `manifest.json` and checked by `ldd` during restoration. This artifact must be used on a T4; a P100 or other architecture requires its own build.
+""")
+
+code("""# 14 — After the human session, stop writers and export this run as one download.
+from pathlib import Path
+import zipfile
+
+voice_demo.close()
+app.close()
+if server_process.poll() is None:
+    server_process.terminate()
+    try:
+        server_process.wait(timeout=15)
+    except subprocess.TimeoutExpired:
+        server_process.kill()
+        server_process.wait(timeout=10)
+server_log_handle.close()
+ARCHIVE = Path('/kaggle/working') / f'duplex_run_{RUN_ID}.zip'
+with zipfile.ZipFile(ARCHIVE, 'w', compression=zipfile.ZIP_DEFLATED) as archive:
+    for path in sorted(OUTPUT.rglob('*')):
+        if path.is_file():
+            archive.write(path, path.relative_to(OUTPUT.parent))
+print('Download:', ARCHIVE)
+print('Bytes:', ARCHIVE.stat().st_size)
+from IPython.display import FileLink, display
+display(FileLink(str(ARCHIVE)))
 """)
 
 notebook = {"cells": cells, "metadata": {"kernelspec": {"display_name": "Python 3", "language": "python", "name": "python3"},
