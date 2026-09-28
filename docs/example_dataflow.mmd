@@ -1,0 +1,35 @@
+sequenceDiagram
+    autonumber
+    actor User
+    participant Transcript as Transcript provider
+    participant Caller as Tool caller
+    participant Control as Controller
+    participant Room as Room lookup
+    participant Queue as Result queue
+    participant Adapter as Duplex adapter
+    participant Model as Speech model
+
+    Note over User,Model: Illustrative correction scenario using the project's room fixtures. The final spoken answer is a research target and is not a proven human-run result.
+    User->>Adapter: Audio: "Where is the robotics seminar?"
+    Adapter->>Model: Continue the same audio conversation
+    User->>Transcript: Spoken question
+    Transcript->>Caller: Committed text: "Where is the robotics seminar?"
+    Caller->>Control: Call room_lookup(name="robotics seminar")
+    Control->>Room: Request 17, version 1
+
+    User->>Adapter: Audio: "Actually, the vision seminar."
+    Adapter->>Model: Continue audio without waiting for lookup
+    User->>Transcript: Spoken correction
+    Transcript->>Caller: Committed correction: "vision seminar"
+    Caller->>Control: Amend request 17: room_lookup(name="vision seminar")
+    Control->>Room: Request 17, version 2
+
+    Room-->>Control: Late version 1 result: robotics = B742
+    Control--xQueue: Discard version 1 because request 17 is now version 2
+    Room-->>Control: Version 2 result: vision = C314
+    Control->>Queue: Accept current fact: vision seminar is in C314
+    Adapter->>Queue: At next permitted input boundary recheck version 2
+    Queue-->>Adapter: Deliver current result only
+    Adapter->>Model: Submit short C314 fact in the same session
+    Model-->>User: Target answer: "The vision seminar is in room C314."
+    Note over Adapter,Model: Log submission, evaluation if known, generated text, audio, and human verdict.

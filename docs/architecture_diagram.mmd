@@ -1,0 +1,28 @@
+block-beta
+  columns 3
+  Speech["User speech"] Adapter["Duplex adapter<br/>one owner of model input"] Model["Ongoing speech-model session"]
+  Transcript["Versioned transcript<br/>only committed words may act"] Queue["Current result queue<br/>recheck before delivery"] Reply["Generated text and speech"]
+  Caller["Replaceable tool caller<br/>call, amend, cancel, clarify, none"] Tools["Allowed tools<br/>run asynchronously"] Record["Evidence<br/>submitted, evaluated, generated, heard"]
+  Controller["Controller<br/>validate calls, track request versions"] space space
+
+  Speech --> Adapter
+  Adapter --> Model
+  Model --> Reply
+  Reply --> Record
+  Speech --> Transcript
+  Transcript --> Caller
+  Caller --> Controller
+  Controller --> Tools
+  Tools --> Queue
+  Queue --> Adapter
+
+  classDef input fill:#fff3d8,stroke:#aa7419,color:#1e1e1e,stroke-width:2px
+  classDef voice fill:#e5f1ff,stroke:#286b9e,color:#1e1e1e,stroke-width:2px
+  classDef decision fill:#eee7ff,stroke:#7051a0,color:#1e1e1e,stroke-width:2px
+  classDef work fill:#e7f5e8,stroke:#3e8047,color:#1e1e1e,stroke-width:2px
+  classDef evidence fill:#eeeeee,stroke:#666666,color:#1e1e1e,stroke-width:2px
+  class Speech input
+  class Adapter,Model,Reply voice
+  class Transcript,Caller decision
+  class Controller,Tools,Queue work
+  class Record evidence

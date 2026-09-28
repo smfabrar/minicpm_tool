@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, Callable
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
@@ -38,6 +38,34 @@ class OmniHttpClient:
         except (HTTPError, URLError, TimeoutError) as exc:
             raise OmniHttpError(str(exc)) from exc
 
+    def post_sse(self, path: str, payload: dict[str, Any],
+                 on_event: Callable[[dict[str, Any]], None]) -> None:
+        """Read one native decode response as events instead of buffering it."""
+        request = Request(
+            self.base_url.rstrip("/") + path,
+            data=json.dumps(payload).encode(),
+            headers={"Content-Type": "application/json"},
+            method="POST",
+        )
+        try:
+            with urlopen(request, timeout=self.timeout_s) as response:
+                if response.headers.get_content_type() != "text/event-stream":
+                    raise OmniHttpError("decode did not return an event stream", uncertain=False)
+                for raw_line in response:
+                    line = raw_line.decode("utf-8", errors="replace").strip()
+                    if line == "data: [DONE]":
+                        return
+                    if not line.startswith("data: "):
+                        continue
+                    try:
+                        event = json.loads(line[6:])
+                    except json.JSONDecodeError:
+                        continue
+                    if isinstance(event, dict):
+                        on_event(event)
+        except (HTTPError, URLError, TimeoutError) as exc:
+            raise OmniHttpError(str(exc)) from exc
+
 
 class MiniCPMStreamSession:
     """The only owner allowed to issue prefill/decode state mutations."""
@@ -60,6 +88,10 @@ class MiniCPMStreamSession:
 
     def capabilities(self) -> AdapterCapabilities:
         return AdapterCapabilities(True, False, True, False, True)
+
+    @property
+    def next_counter(self) -> int:
+        return self._last_counter + 1
 
     async def observe(self) -> Observation:
         return await self._observations.get()
@@ -177,3 +209,43 @@ class MiniCPMStreamSession:
                 if "is_listen" in data:
                     await self._observations.put(Observation("listening" if data["is_listen"] else "speaking", value=bool(data["is_listen"])))
             return body
+
+    async def decode_stream(self, *, debug_dir: str, round_idx: int = -1,
+                            on_event: Callable[[dict[str, Any]], None] | None = None) -> None:
+        """Expose text/listen events as they arrive while preserving input order."""
+        if not self._initialized:
+            raise ValueError("session must be initialized before decode")
+        async with self._model_lock:
+            loop = asyncio.get_running_loop()
+            events: asyncio.Queue[dict[str, Any] | BaseException | None] = asyncio.Queue()
+
+            def worker() -> None:
+                try:
+                    self.client.post_sse(
+                        "/v1/stream/decode",
+                        {"debug_dir": debug_dir, "round_idx": round_idx, "stream": True},
+                        lambda event: loop.call_soon_threadsafe(events.put_nowait, event),
+                    )
+                except BaseException as exc:
+                    loop.call_soon_threadsafe(events.put_nowait, exc)
+                finally:
+                    loop.call_soon_threadsafe(events.put_nowait, None)
+
+            task = asyncio.create_task(asyncio.to_thread(worker))
+            while True:
+                event = await events.get()
+                if event is None:
+                    break
+                if isinstance(event, BaseException):
+                    await task
+                    raise event
+                if event.get("content"):
+                    await self._observations.put(Observation("assistant_text", value=str(event["content"])))
+                if "is_listen" in event:
+                    await self._observations.put(Observation(
+                        "listening" if event["is_listen"] else "speaking",
+                        value=bool(event["is_listen"]),
+                    ))
+                if on_event is not None:
+                    on_event(event)
+            await task

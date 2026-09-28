@@ -1,0 +1,236 @@
+diff --git a/tools/omni/omni.cpp b/tools/omni/omni.cpp
+index 3e029c6..1ad3b56 100644
+--- a/tools/omni/omni.cpp
++++ b/tools/omni/omni.cpp
+@@ -3880,6 +3880,7 @@ std::atomic<bool> t2w_thread_running(true);
+ struct DuplexEncodeReq {
+     std::string aud_fname;
+     std::string img_fname;
++    std::string tool_context;
+     int         index;
+     int         max_slice_nums;  // -1 = 使用全局
+ };
+@@ -3887,6 +3888,7 @@ struct DuplexEncodeReq {
+ struct DuplexPrefillPacket {
+     std::vector<std::vector<float>> vision_embed;  // [0]=overview, [1..]=slices
+     std::vector<float>              audio_embed;
++    std::string                     tool_context;
+     int                             index = 0;
+ };
+ 
+@@ -3946,7 +3948,8 @@ static void duplex_stop_threads(omni_context * ctx_omni);
+ static bool duplex_prefill(omni_context * ctx_omni,
+                            const std::string & aud_fname,
+                            const std::string & img_fname,
+-                           int index, int max_slice_nums);
++                           int index, int max_slice_nums,
++                           const std::string & tool_context);
+ static bool duplex_decode(omni_context * ctx_omni,
+                           const std::string & debug_dir,
+                           int round_idx);
+@@ -9373,6 +9376,7 @@ static void duplex_encoder_thread_func(omni_context * ctx_omni, common_params *
+ 
+         DuplexPrefillPacket * packet = new DuplexPrefillPacket();
+         packet->index = req->index;
++        packet->tool_context = std::move(req->tool_context);
+ 
+         const bool has_img = !req->img_fname.empty() && ctx_omni->ctx_vision != nullptr;
+         const bool has_aud = !req->aud_fname.empty();
+@@ -9628,6 +9632,8 @@ static inline void append_raw_emb(std::vector<float> & fused,
+ static bool duplex_do_prefill_one_fused(omni_context * ctx_omni, common_params * params,
+                                         DuplexPrefillPacket * packet,
+                                         int hidden_size) {
++    // Dynamic tool text uses the auditable tokenization path below.
++    if (!packet->tool_context.empty()) return false;
+     DuplexPipeline * dup = ctx_omni->duplex;
+     if (!dup->emb_cache.initialized) return false;
+     if (dup->emb_cache.hidden_size != hidden_size) return false;
+@@ -9711,7 +9717,7 @@ static bool duplex_do_prefill_one_fused(omni_context * ctx_omni, common_params *
+     return true;
+ }
+ 
+-static void duplex_do_prefill_one(omni_context * ctx_omni, common_params * params,
++static bool duplex_do_prefill_one(omni_context * ctx_omni, common_params * params,
+                                   DuplexPrefillPacket * packet,
+                                   int hidden_size) {
+     auto t_begin   = std::chrono::high_resolution_clock::now();
+@@ -9730,6 +9736,15 @@ static void duplex_do_prefill_one(omni_context * ctx_omni, common_params * param
+             ? (int)(packet->audio_embed.size() / hidden_size) : 0;
+         bool has_audio  = (n_audio_tokens > 0);
+         bool has_vision = !packet->vision_embed.empty();
++        auto eval_tool_context = [&]() {
++            if (packet->tool_context.empty()) return true;
++            const int before = ctx_omni->n_past;
++            const bool ok = eval_string(ctx_omni, params, packet->tool_context.c_str(),
++                                        params->n_batch, &ctx_omni->n_past, false);
++            print_with_timestamp("[tool_context] unit=%d ok=%d n_past=%d->%d\n",
++                                 packet->index, ok, before, ctx_omni->n_past);
++            return ok;
++        };
+ 
+         if (has_vision) {
+             int n_chunks         = (int)packet->vision_embed.size();
+@@ -9756,6 +9771,7 @@ static void duplex_do_prefill_one(omni_context * ctx_omni, common_params * param
+                             params->n_batch, &ctx_omni->n_past, false);
+             }
+             if (has_audio) {
++                if (!eval_tool_context()) return false;
+                 // duplex 下 audio 直接跟在 vision 后面（无 audio_start/end 标签）
+                 prefill_with_emb(ctx_omni, params, packet->audio_embed.data(),
+                                  n_audio_tokens, params->n_batch, &ctx_omni->n_past);
+@@ -9764,6 +9780,7 @@ static void duplex_do_prefill_one(omni_context * ctx_omni, common_params * param
+             // 纯音频 unit
+             eval_string(ctx_omni, params, "<unit>",
+                         params->n_batch, &ctx_omni->n_past, false);
++            if (!eval_tool_context()) return false;
+             if (has_audio) {
+                 prefill_with_emb(ctx_omni, params, packet->audio_embed.data(),
+                                  n_audio_tokens, params->n_batch, &ctx_omni->n_past);
+@@ -9786,6 +9803,7 @@ static void duplex_do_prefill_one(omni_context * ctx_omni, common_params * param
+         "[prof] llm prefill n_past=%d->%d tokens=%d ms=%.1f\n",
+         n_past_0, ctx_omni->n_past,
+         ctx_omni->n_past - n_past_0, ms);
++    return true;
+ }
+ 
+ // ---------------------------------------------------------------------------
+@@ -10171,12 +10189,24 @@ static void duplex_llm_thread_func(omni_context * ctx_omni, common_params * para
+ 
+             if (packet) {
+                 // Stage 3: 先试 fused（1 次 llama_decode），失败回退到老 5-7 段路径。
++                bool prefill_ok = true;
+                 if (!duplex_do_prefill_one_fused(ctx_omni, params, packet, hidden_size)) {
+-                    duplex_do_prefill_one(ctx_omni, params, packet, hidden_size);
++                    prefill_ok = duplex_do_prefill_one(ctx_omni, params, packet, hidden_size);
+                 }
+                 delete packet;
+                 dup->in_flight_prefill.fetch_sub(1);
+                 dup->in_flight_cv.notify_all();
++                if (!prefill_ok) {
++                    decode_req->ok.store(false);
++                    decode_req->done.store(true);
++                    dup->decode_done_cv.notify_all();
++                    {
++                        std::lock_guard<std::mutex> text_lock(ctx_omni->text_mtx);
++                        ctx_omni->text_done_flag = true;
++                    }
++                    ctx_omni->text_cv.notify_all();
++                    continue;
++                }
+             }
+         }
+ 
+@@ -10201,7 +10231,8 @@ static void duplex_llm_thread_func(omni_context * ctx_omni, common_params * para
+ static bool duplex_prefill(omni_context * ctx_omni,
+                            const std::string & aud_fname,
+                            const std::string & img_fname,
+-                           int index, int max_slice_nums) {
++                           int index, int max_slice_nums,
++                           const std::string & tool_context) {
+     if (!ctx_omni || !ctx_omni->duplex) {
+         LOG_ERR("duplex_prefill: pipeline not initialized\n");
+         return false;
+@@ -10211,6 +10242,7 @@ static bool duplex_prefill(omni_context * ctx_omni,
+     DuplexEncodeReq * req = new DuplexEncodeReq();
+     req->aud_fname      = aud_fname;
+     req->img_fname      = img_fname;
++    req->tool_context   = tool_context;
+     req->index          = index;
+     req->max_slice_nums = max_slice_nums;
+ 
+@@ -10282,7 +10314,7 @@ bool stream_prefill(struct omni_context * ctx_omni, std::string aud_fname, std::
+     //   仍沿用下方原逻辑；线程启动点会在原逻辑末尾调用 duplex_start_threads。
+     if (ctx_omni->duplex_mode && ctx_omni->async && index > 0
+         && ctx_omni->system_prompt_initialized && ctx_omni->duplex != nullptr) {
+-        return duplex_prefill(ctx_omni, aud_fname, img_fname, index, max_slice_nums);
++        return duplex_prefill(ctx_omni, aud_fname, img_fname, index, max_slice_nums, text);
+     }
+ 
+     // 只有在新一轮开始时 (index == 0) 才需要等待上一轮 TTS 完成
+diff --git a/tools/server/protocol.cpp b/tools/server/protocol.cpp
+index 50c43dd..4c66415 100644
+--- a/tools/server/protocol.cpp
++++ b/tools/server/protocol.cpp
+@@ -324,6 +324,19 @@ ParsedInput parse_input_append(const json & msg) {
+         out.audio_b64 = extract_audio_b64(in.at("audio"));
+     }
+     out.audio_b64 = strip_data_url_prefix(out.audio_b64);
++    // The gateway and worker pass input objects through unchanged. Only this
++    // explicit extension may carry a tool result into the live model context.
++    if (in.contains("tool_context")) {
++        if (!in.at("tool_context").is_string()) {
++            out.error = "tool_context must be a string";
++            return out;
++        }
++        out.tool_context = in.at("tool_context").get<std::string>();
++        if (out.tool_context.size() > 640) {
++            out.error = "tool_context exceeds 640 bytes";
++            return out;
++        }
++    }
+ 
+     auto append_frames = [&](const json & frames) {
+         if (!frames.is_array()) {
+diff --git a/tools/server/protocol.h b/tools/server/protocol.h
+index 1721777..717cf23 100644
+--- a/tools/server/protocol.h
++++ b/tools/server/protocol.h
+@@ -105,6 +105,7 @@ struct ParsedInput {
+     std::vector<std::string> video_frames_b64;     // base64 JPEG frames
+     int max_slice_nums = -1;
+     bool force_listen = false;            // full_duplex: force this step to LISTEN
++    std::string tool_context;              // experiment extension: validated tool result
+ 
+     // Turn-based fields
+     bool streaming = true;
+diff --git a/tools/server/ws_handler.cpp b/tools/server/ws_handler.cpp
+index 5cf6427..a991c64 100644
+--- a/tools/server/ws_handler.cpp
++++ b/tools/server/ws_handler.cpp
+@@ -1,4 +1,5 @@
+ #include <algorithm>
++#include <atomic>
+ #include <chrono>
+ #include <cstdio>
+ #include <cstdlib>
+@@ -1104,7 +1105,8 @@ void handle_ws_backend(httplib::ws::WebSocket & ws,
+                 const auto t_prefill_start = std::chrono::steady_clock::now();
+                 std::lock_guard<std::mutex> lock(octx_mutex);
+                 if (!stream_prefill(octx, tmp_files.audio_path, tmp_files.image_path,
+-                                    input_index, parsed_input.max_slice_nums)) {
++                                    input_index, parsed_input.max_slice_nums,
++                                    parsed_input.tool_context)) {
+                     tmp_files.cleanup();
+                     fail_fast(session_id, "prefill_failed");
+                     return;
+@@ -1140,8 +1142,9 @@ void handle_ws_backend(httplib::ws::WebSocket & ws,
+             }
+ 
+             const auto t_generate_start = std::chrono::steady_clock::now();
+-            std::thread decode_thread([octx, debug_dir]() {
+-                stream_decode(octx, debug_dir, -1);
++            std::atomic<bool> decode_ok{false};
++            std::thread decode_thread([octx, debug_dir, &decode_ok]() {
++                decode_ok.store(stream_decode(octx, debug_dir, -1));
+             });
+ 
+             // Collect full text for response.done
+@@ -1208,6 +1211,18 @@ void handle_ws_backend(httplib::ws::WebSocket & ws,
+             if (decode_thread.joinable()) {
+                 decode_thread.join();
+             }
++            if (!parsed_input.tool_context.empty()) {
++                json context_event;
++                context_event["type"] = "tool_context.evaluated";
++                context_event["unit"] = input_index;
++                context_event["ok"] = decode_ok.load();
++                context_event["session_id"] = session_id;
++                send_event(context_event);
++                if (!decode_ok.load()) {
++                    fail_fast(session_id, "tool_context_eval_failed");
++                    return;
++                }
++            }
+             double generate_ms = elapsed_ms(t_generate_start);
+             {
+                 const std::string text = sanitize_utf8_stream(utf8_pending, "", true);

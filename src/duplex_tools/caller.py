@@ -106,7 +106,24 @@ class GraniteToolCaller:
             return CallerAction("cancel" if request_id else "clarify", request_id=request_id,
                                 message="Which pending request?" if request_id is None else "", raw=f"route={route_raw}")
         if selected == "amend":
-            return CallerAction("clarify", message="Please restate the corrected complete request.", raw=f"route={route_raw}")
+            if len(pending) != 1:
+                return CallerAction("clarify", message="Which pending request should be corrected?", raw=f"route={route_raw}")
+            request_id, prior_tool = next(iter(pending.items()))
+            if prior_tool not in schemas:
+                return CallerAction("clarify", message="Please restate the corrected complete request.", raw=f"route={route_raw}")
+            raw = await asyncio.to_thread(
+                self.generate,
+                [
+                    {"role": "system", "content": "The user is correcting a pending tool request. Call the provided tool with only the corrected detail present in the latest speech. Output only the native tool call."},
+                    {"role": "user", "content": segment.text},
+                ],
+                [schemas[prior_tool]],
+            )
+            action = parse_granite_output(raw)
+            if action.kind != "call" or action.tool != prior_tool:
+                return CallerAction("clarify", message="Please restate the corrected complete request.", raw=f"route={route_raw}\n{raw}")
+            return CallerAction("amend", tool=prior_tool, arguments=action.arguments,
+                                request_id=request_id, raw=f"route={route_raw}\n{raw}")
 
         argument_messages = [
             {"role": "system", "content": "Call the provided tool for the user speech. Copy only details present in that speech. Output only the native tool call."},

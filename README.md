@@ -2,7 +2,15 @@
 
 This repository extracts the reusable tool path from the MiniCPM experiments into a Python package. The core has no MiniCPM dependency. MiniCPM is the first real adapter, and `SimulatedAdapter` exercises the portable contract. The original model runtime and weights are separate; the revision-specific input patch is in `fixtures/context-injection.patch` for Kaggle reproduction.
 
-## Run on Kaggle
+## Live duplex experiment
+
+[`notebooks/kaggle_live_duplex.ipynb`](notebooks/kaggle_live_duplex.ipynb) is the next human experiment. It uses the pinned [official MiniCPM-o Demo Realtime API](https://github.com/OpenBMB/MiniCPM-o-Demo/blob/main/docs-app/content/docs/en/realtime-api/audio.md): gateway → worker → C++ MiniCPM backend. The browser sends microphone chunks continuously; the adapter sends one-second 16 kHz float32 units to one native WebSocket session. MiniCPM itself decides when to listen or speak and produces 24 kHz speech. Whisper Tiny and Granite 350M run beside it only to select and execute external tools. A small, separately pinned C++ extension delivers a verified tool result at a native audio boundary and acknowledges evaluation. The notebook adds five seconds to room lookup so a spoken correction can be tested while a request is pending.
+
+The run saves microphone and input-unit WAVs, committed utterances, caller actions, controller decisions, native model text and speech deltas, timing, official service logs, and a human listening verdict in one export ZIP. See [`docs/live_duplex_protocol.md`](docs/live_duplex_protocol.md) for the exact test and acceptance criteria.
+
+This prepares a live overlap test; no Kaggle live result has been observed yet. The browser bridge is Gradio because Kaggle cannot expose the official gateway UI directly. Backlog and timestamps show whether a run kept pace. A native `tool_context.evaluated` event reports when injected text was evaluated; it does not prove the spoken answer was correct or audible, so the listener records that separately.
+
+## Controlled-turn notebook on Kaggle
 
 Open [`notebooks/kaggle_duplex_tools.ipynb`](notebooks/kaggle_duplex_tools.ipynb) in Kaggle. Enable Internet. Set `SOURCE_REF` in the first code cell and run the CPU phase. After enabling a GPU and Kaggle restarts the runtime, rerun the tag and setup cells. The GPU phase builds the pinned patched `llama.cpp-omni`, locates or downloads the audio-only GGUF modules, starts the server, and opens a password-protected microphone UI. Ask about the robotics seminar and listen for **B742**. The UI records the transcript, selected action, HTTP submission, model text, audio file, and your listening verdict.
 
@@ -62,7 +70,7 @@ The schema validator allows exactly one required string field per tool and rejec
 
 The MiniCPM patch targets `tc-mb/llama.cpp-omni` commit `64d092c60db4b4ee45768476bd752f03fdcc98ea`. The patch includes the existing server initialization changes required for audio-only startup and the `next_cnt` response. It applies cleanly to a pristine pinned checkout and the resulting runtime builds locally. See [`EVIDENCE.md`](EVIDENCE.md) for the earlier context-injection observation. No MiniCPM source or weights are committed here.
 
-The first extraction does not yet have a live streaming microphone loop, incremental SSE playback, native KV evaluation acknowledgement, or a human correction while a tool runs. Those require the subsequent integration and overlap stages. The checked-in notebook is prepared and syntax-checked locally; its GPU and microphone cells must be run in Kaggle to establish the human result.
+The controlled HTTP notebook above remains the original completed-turn experiment. The separate live notebook now has a native WebSocket microphone loop and a tool-context evaluation acknowledgement, but its GPU build and human interaction still need to be run in Kaggle to establish a research result.
 
 The observed Granite pilot failures, safety boundaries, and measurement policy are recorded in [`docs/caller_failure_analysis.md`](docs/caller_failure_analysis.md).
 
