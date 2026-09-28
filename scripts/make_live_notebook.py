@@ -34,7 +34,7 @@ Official protocol: [audio Realtime API](https://github.com/OpenBMB/MiniCPM-o-Dem
 """)
 
 code("""# 1 — Select a tested adapter release. Run again after a Kaggle kernel restart.
-SOURCE_REF = 'v0.1.22'
+SOURCE_REF = 'v0.1.23'
 DEMO_PIN = '47709a9210dfd71afa76c058e017fc8c4db5c8d2'
 OMNI_PIN = '873056743b74e1a4ce5dcf7290e2298428e214db'
 print('Adapter:', SOURCE_REF, 'Demo:', DEMO_PIN[:12], 'C++:', OMNI_PIN[:12])
@@ -265,7 +265,7 @@ from duplex_tools.caller import GraniteToolCaller, TransformersGraniteGenerator
 from duplex_tools.controller import ContextController, JsonlEventLog
 from duplex_tools.conversation import ConversationRouter
 from duplex_tools.official_realtime import OfficialRealtimeExperiment
-from duplex_tools.live_duplex import make_live_gradio_ui
+from duplex_tools.live_duplex import RestartableLiveExperiment, make_live_gradio_ui
 from duplex_tools.tools import RoomLookup, SafeCalculator, DocumentSearch
 
 # Five seconds makes the correction scenario observable. It is an experimental
@@ -282,11 +282,8 @@ tools = {'room_lookup': delayed_room_lookup, 'calculator': SafeCalculator(),
          'document_search': DocumentSearch({
              'Thesis deadlines': 'The draft is due on October 15; the final copy is due on November 20.',
              'Lab access': 'The lab is open Monday through Friday from 9 to 17.'})}
-controller = ContextController(tools, tool_timeout_s=12,
-                               log=JsonlEventLog(OUTPUT / 'controller.jsonl'))
 AUX_GPU = 1 if torch.cuda.device_count() > 1 else 0
 granite_backend = TransformersGraniteGenerator(device=f'cuda:{AUX_GPU}')
-router = ConversationRouter(GraniteToolCaller(granite_backend), controller)
 recognizer = WhisperModel('tiny.en', device='cuda', device_index=AUX_GPU,
                           compute_type='float16')
 manifest['granite_revision'] = granite_backend.model_revision
@@ -294,13 +291,19 @@ manifest['granite_snapshot'] = granite_backend.model_source
 manifest['whisper_model'] = 'tiny.en'
 manifest['tool_sidecar_gpu'] = AUX_GPU
 (OUTPUT / 'run_manifest.json').write_text(json.dumps(manifest, indent=2) + '\\n')
-live_experiment = OfficialRealtimeExperiment(
-    session=None, router=router, recognizer=recognizer, output_root=OUTPUT,
-    gateway_url=f'ws://127.0.0.1:{GATEWAY_PORT}/v1/realtime?mode=audio',
-    reference_audio=REF_AUDIO,
-    system_prompt='You are a helpful voice assistant. Listen to the user and answer naturally. '
-                  'If a verified tool result appears, use it in your reply; do not invent a room or deadline.',
-    max_backlog_s=12, final_silence_units=8)
+def new_live_session():
+    controller = ContextController(tools, tool_timeout_s=12,
+                                   log=JsonlEventLog(OUTPUT / 'controller.jsonl'))
+    router = ConversationRouter(GraniteToolCaller(granite_backend), controller)
+    return OfficialRealtimeExperiment(
+        session=None, router=router, recognizer=recognizer, output_root=OUTPUT,
+        gateway_url=f'ws://127.0.0.1:{GATEWAY_PORT}/v1/realtime?mode=audio',
+        reference_audio=REF_AUDIO,
+        system_prompt='You are a helpful voice assistant. Listen to the user and answer naturally. '
+                      'If a verified tool result appears, use it in your reply; do not invent a room or deadline.',
+        max_backlog_s=12, final_silence_units=8)
+
+live_experiment = RestartableLiveExperiment(new_live_session)
 print('Native speech: MiniCPM. Tool sidecar: Whisper Tiny + Granite on', f'cuda:{AUX_GPU}')
 """)
 
@@ -318,10 +321,10 @@ print('Run output:', OUTPUT)
 
 md("""## Speak, inspect, and save
 
-1. Press **Start live session** once. Initialization runs in the background, so the share page stays responsive. When status says **running**, press **Begin microphone when ready**. Keep it open while you speak and while MiniCPM answers.
+1. Press **Start live session**. Initialization runs in the background, so the share page stays responsive. When status says **running**, click the **record button inside the microphone panel**. The browser must start its own microphone. Keep it recording while you speak and while MiniCPM answers.
 2. Say “Where is the robotics seminar?” Then, before the delayed lookup returns, say “Actually, the vision seminar.” The current answer should name **C314**, not B742. Check the tool trace and listen to the spoken answer.
 3. While MiniCPM is talking, ask “What is 17 times 23?” This checks whether capture continues during output. If there is no audible overlap, record that honestly.
-4. Press **Stop and finish**. Wait for `complete` or `failed`. Record the exact words heard and whether you spoke during the assistant's audio. The tool extension reports `tool_context.evaluated`; an ACK shows evaluation finished, while the spoken verdict tells us whether the answer was useful.
+4. You may stop the microphone recording and click it again to resume within the same native session. To end the run, stop the microphone in its panel, then press **Stop and finish**. Wait for `complete` or `failed`. Record the exact words heard and whether you spoke during the assistant's audio. A later **Start live session** creates a fresh native and tool session without rebuilding the server.
 5. Run the export cell below and download the ZIP. A Gradio 504 does not erase the local logs; inspect `live_status.json`, `live_events.jsonl`, and service logs before retrying.
 
 The run directory includes the complete microphone recording, each native input unit, committed utterances, tool events, returned audio chunks, human verdicts, gateway/worker/backend logs, code revisions, and a summary. The session is bounded by the official API's 600-second limit.

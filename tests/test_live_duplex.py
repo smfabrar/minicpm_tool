@@ -12,7 +12,7 @@ from duplex_tools.caller import ChoiceScores, GraniteToolCaller
 from duplex_tools.contracts import CallerAction, TranscriptSegment
 from duplex_tools.controller import ContextController
 from duplex_tools.conversation import ConversationRouter
-from duplex_tools.live_duplex import LiveDuplexExperiment, SpeechSegmenter
+from duplex_tools.live_duplex import LiveDuplexExperiment, RestartableLiveExperiment, SpeechSegmenter
 from duplex_tools.tools import RoomLookup
 
 
@@ -29,6 +29,46 @@ class SegmenterTests(unittest.TestCase):
         self.assertEqual(len(completed), 1)
         self.assertGreater(len(completed[0]), len(pcm(4000, 0.4)))
         self.assertIsNone(segmenter.flush())
+
+
+class RestartTests(unittest.TestCase):
+    def test_completed_trial_gets_fresh_session_and_active_start_is_idempotent(self):
+        created = []
+
+        class Trial:
+            def __init__(self, number):
+                self.number = number
+                self.status = "ready"
+                self.closed = False
+
+            def start(self):
+                self.status = "running"
+                return f"session-{self.number}"
+
+            def snapshot(self):
+                return {"status": self.status, "session_id": f"session-{self.number}"}
+
+            def stop(self, _session_id=None):
+                self.status = "complete"
+                return "complete"
+
+            def close(self):
+                self.closed = True
+
+        def factory():
+            trial = Trial(len(created) + 1)
+            created.append(trial)
+            return trial
+
+        manager = RestartableLiveExperiment(factory)
+        self.assertEqual(manager.start(), "session-1")
+        self.assertEqual(manager.start(), "session-1")
+        self.assertEqual(len(created), 1)
+        manager.stop("session-1")
+        self.assertEqual(manager.start(), "session-2")
+        self.assertEqual(len(created), 2)
+        manager.close()
+        self.assertTrue(all(trial.closed for trial in created))
 
 
 class AmendmentTests(unittest.IsolatedAsyncioTestCase):

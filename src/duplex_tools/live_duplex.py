@@ -19,7 +19,7 @@ from array import array
 from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from .context_events import Boundary
 from .contracts import TranscriptSegment
@@ -540,27 +540,85 @@ class LiveDuplexExperiment:
         self._thread.join(timeout=5)
 
 
-def make_live_gradio_ui(experiment: LiveDuplexExperiment):
+class RestartableLiveExperiment:
+    """Create a clean native and tool session after each completed trial.
+
+    Model weights are owned by the caller's factory and may be reused. Each
+    trial gets a fresh controller, router, native session, and output directory.
+    """
+
+    def __init__(self, factory: Callable[[], LiveDuplexExperiment]) -> None:
+        self.factory = factory
+        self.current: LiveDuplexExperiment | None = None
+        self.sessions: dict[str, LiveDuplexExperiment] = {}
+        self._lock = threading.RLock()
+
+    def start(self) -> str:
+        with self._lock:
+            if self.current is not None:
+                state = self.current.snapshot()
+                if state.get("status") in {"connecting", "running", "finishing"}:
+                    return str(state["session_id"])
+            experiment = self.factory()
+            try:
+                session_id = experiment.start()
+            except Exception:
+                experiment.close()
+                raise
+            self.current = experiment
+            self.sessions[session_id] = experiment
+            return session_id
+
+    def _session(self, session_id: str) -> LiveDuplexExperiment | None:
+        with self._lock:
+            return self.sessions.get(session_id)
+
+    def receive(self, session_id: str, audio: tuple[int, Any] | None) -> str:
+        experiment = self._session(session_id)
+        return experiment.receive(session_id, audio) if experiment else "Start a live session first."
+
+    def stop(self, session_id: str | None = None) -> str:
+        experiment = self._session(session_id) if session_id else self.current
+        return experiment.stop(session_id) if experiment else "No live session has started."
+
+    def next_playback(self, session_id: str) -> Path | None:
+        experiment = self._session(session_id)
+        return experiment.next_playback(session_id) if experiment else None
+
+    def snapshot(self) -> dict[str, Any]:
+        return self.current.snapshot() if self.current else {"status": "ready", "session_id": None}
+
+    def annotate(self, session_id: str, verdict: str, overlap: str, notes: str) -> str:
+        experiment = self._session(session_id)
+        return (experiment.annotate(session_id, verdict, overlap, notes) if experiment
+                else "Session ID does not match.")
+
+    def close(self) -> None:
+        with self._lock:
+            experiments = list(self.sessions.values())
+        for experiment in experiments:
+            experiment.close()
+
+
+def make_live_gradio_ui(experiment: LiveDuplexExperiment | RestartableLiveExperiment):
     """Short microphone requests and independent long-lived audio playback."""
     import gradio as gr
 
     def start():
         session_id = experiment.start()
-        ready = experiment.snapshot().get("status") == "running" and not hasattr(experiment, "_connection_future")
-        message = ("Recording and processing live audio." if ready else
-                   "Connecting to MiniCPM. Wait for status running, then press Begin microphone.")
-        return session_id, gr.Audio(recording=ready), message
+        return session_id, ("Connecting to MiniCPM. When status says running, click the microphone's own record button."
+                            if experiment.snapshot().get("status") == "connecting" else
+                            "Session running. Click the microphone's own record button.")
 
-    def begin_microphone():
-        if experiment.snapshot().get("status") != "running":
-            return gr.skip(), "MiniCPM is still connecting. Wait for status running."
-        return gr.Audio(recording=True), "Recording and processing live audio."
+    def microphone_started(session_id):
+        return ("Recording microphone audio." if session_id else
+                "Start a live session before recording.")
 
     def receive(audio, session_id):
         return experiment.receive(session_id, audio)
 
     def stop(session_id):
-        return experiment.stop(session_id), gr.Audio(recording=False)
+        return experiment.stop(session_id)
 
     def play(session_id):
         while True:
@@ -577,14 +635,13 @@ def make_live_gradio_ui(experiment: LiveDuplexExperiment):
                 json.dumps(snapshot, indent=2))
 
     with gr.Blocks(title="Live duplex tool experiment") as app:
-        gr.Markdown("# Live MiniCPM tool experiment\nStart the session once. When status says **running**, press **Begin microphone** and keep it open while MiniCPM speaks. Try correcting a room request while its lookup is running. Use headphones to keep speaker audio out of the microphone. Stop and save your listening verdict before exporting the run.")
+        gr.Markdown("# Live MiniCPM tool experiment\nPress **Start live session**. When status says **running**, click the **record button inside the microphone panel**. The separate Begin button has been removed because the browser must start its own microphone. You can pause and resume recording without ending the model session. To finish, stop the microphone in its panel, then press **Stop and finish**. A later Start creates a new native session. Use headphones while testing overlap.")
         session_id = gr.State("")
         with gr.Row():
             microphone = gr.Audio(sources=["microphone"], type="numpy", streaming=True,
                                   label="Live microphone")
             speaker = gr.Audio(streaming=True, autoplay=True, label="MiniCPM live speech")
         start_button = gr.Button("Start live session", variant="primary")
-        record_button = gr.Button("Begin microphone when ready")
         stop_button = gr.Button("Stop and finish")
         ingest_status = gr.Textbox(label="Microphone status", interactive=False)
         status = gr.Textbox(label="Session status", value="ready", interactive=False)
@@ -592,20 +649,18 @@ def make_live_gradio_ui(experiment: LiveDuplexExperiment):
         assistant = gr.Textbox(label="Assistant text", interactive=False)
         backlog = gr.Textbox(label="Input backlog in seconds", interactive=False)
         trace = gr.Code(label="Latest event and status", language="json")
-        start_event = start_button.click(start, outputs=[session_id, microphone, status],
+        start_event = start_button.click(start, outputs=[session_id, status],
                                          queue=False, concurrency_limit=1)
         start_event.then(play, inputs=[session_id], outputs=[speaker],
                          concurrency_id="live_playback", concurrency_limit=1,
                          show_progress="hidden")
-        record_button.click(begin_microphone, outputs=[microphone, ingest_status],
-                            queue=False, show_progress="hidden")
+        microphone.start_recording(microphone_started, inputs=[session_id],
+                                   outputs=[ingest_status], queue=False, show_progress="hidden")
         microphone.stream(receive, inputs=[microphone, session_id], outputs=[ingest_status],
                           stream_every=0.5, time_limit=3600, queue=False,
                           trigger_mode="multiple", concurrency_limit=1,
                           show_progress="hidden")
-        microphone.stop_recording(stop, inputs=[session_id], outputs=[status, microphone],
-                                  queue=False, show_progress="hidden")
-        stop_button.click(stop, inputs=[session_id], outputs=[status, microphone],
+        stop_button.click(stop, inputs=[session_id], outputs=[status],
                           queue=False, show_progress="hidden")
         gr.Timer(value=1.0, active=True).tick(
             poll, outputs=[status, transcript, assistant, backlog, trace],
