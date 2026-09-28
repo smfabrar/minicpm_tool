@@ -34,7 +34,7 @@ Official protocol: [audio Realtime API](https://github.com/OpenBMB/MiniCPM-o-Dem
 """)
 
 code("""# 1 — Select a tested adapter release. Run again after a Kaggle kernel restart.
-SOURCE_REF = 'v0.1.23'
+SOURCE_REF = 'v0.1.24'
 DEMO_PIN = '47709a9210dfd71afa76c058e017fc8c4db5c8d2'
 OMNI_PIN = '873056743b74e1a4ce5dcf7290e2298428e214db'
 print('Adapter:', SOURCE_REF, 'Demo:', DEMO_PIN[:12], 'C++:', OMNI_PIN[:12])
@@ -328,6 +328,8 @@ md("""## Speak, inspect, and save
 5. Run the export cell below and download the ZIP. A Gradio 504 does not erase the local logs; inspect `live_status.json`, `live_events.jsonl`, and service logs before retrying.
 
 The run directory includes the complete microphone recording, each native input unit, committed utterances, tool events, returned audio chunks, human verdicts, gateway/worker/backend logs, code revisions, and a summary. The session is bounded by the official API's 600-second limit.
+
+If live speech sounds broken up, listen to `speaker_combined.wav` from cell 13. That file joins only MiniCPM's actual output. If it sounds smooth while the live page stutters, the browser delivery is implicated. The timing report below measures gaps between native chunks and adapter dispatch; it cannot tell exactly when browser playback became audible.
 """)
 
 code("""# 13 — Inspect a finished run without touching the active model.
@@ -339,6 +341,8 @@ if state.get('session_id'):
     summary_path = session_dir / 'live_summary.json'
     if summary_path.is_file():
         print(summary_path.read_text())
+        subprocess.run([sys.executable, str(ROOT / 'scripts' / 'analyze_live_export.py'),
+                        str(session_dir)], check=True)
         if (session_dir / 'speaker_combined.wav').is_file():
             display(FileLink(str(session_dir / 'speaker_combined.wav')))
 """)

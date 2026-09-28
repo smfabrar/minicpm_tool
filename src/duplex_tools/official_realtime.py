@@ -12,6 +12,7 @@ import asyncio
 import base64
 import concurrent.futures
 import json
+import re
 import time
 import uuid
 import wave
@@ -36,6 +37,17 @@ def wav_float32_b64(path: Path) -> str:
             np.arange(len(mono)) / rate, mono,
         ).astype("<f4")
     return base64.b64encode(np.asarray(mono, dtype="<f4").tobytes()).decode("ascii")
+
+
+def native_response_unit(response_id: str) -> int | None:
+    """Read the input unit number used by the pinned OpenBMB backend."""
+    match = re.search(r"_resp_(\d+)$", response_id)
+    return int(match.group(1)) if match else None
+
+
+def client_unit_for_tool_ack(backend_unit: int) -> int:
+    """The pinned backend's input_index starts one ahead of input.append count."""
+    return backend_unit - 1
 
 
 class OfficialRealtimeExperiment(LiveDuplexExperiment):
@@ -124,21 +136,23 @@ class OfficialRealtimeExperiment(LiveDuplexExperiment):
         self._awaiting_post_result = False
         self._post_result_text = ""
         self._sent_units = 0
-        self._completed_response_ids: set[str] = set()
+        self._last_native_response_unit = 0
+        self._last_native_event_ns = time.monotonic_ns()
         self._max_native_pending_units = 0
         self._injected: dict[int, str] = {}
         self._acknowledged: set[str] = set()
         self._send_lock = asyncio.Lock()
         self._closed_event = asyncio.Event()
-        self._silence_path = self.directory / "one_second_silence.wav"
-        write_wav(self._silence_path, bytes(32000))
         settings = {"session_id": self.id, "started_at": utc_now(),
                     "protocol": "/v1/realtime?mode=audio", "input_unit_s": 1.0,
                     "transport_chunk_target_s": 0.5, "vad_rms": self.vad_rms,
                     "vad_pause_s": self.vad_pause_s, "max_backlog_s": self.max_backlog_s,
                     "final_silence_units": self.final_silence_units,
                     "reference_audio": str(self.reference_audio),
-                    "native_context_evaluation_ack": True}
+                    "native_context_evaluation_ack": True,
+                    "playback_transport": "gradio_wav_bytes_without_synthetic_silence",
+                    "native_response_progress": "pinned_backend_response_id_unit_suffix",
+                    "tool_ack_unit_offset": 1}
         (self.directory / "live_manifest.json").write_text(json.dumps(settings, indent=2) + "\n")
         self._set_state(status="connecting", session_id=self.id, started_at=settings["started_at"],
                         input_backlog_s=0.0, received_audio_s=0.0, last_transcript="",
@@ -186,7 +200,7 @@ class OfficialRealtimeExperiment(LiveDuplexExperiment):
         counter = self._sent_units
         self._max_native_pending_units = max(
             self._max_native_pending_units,
-            self._sent_units - len(self._completed_response_ids),
+            self._sent_units - self._last_native_response_unit,
         )
         path = self.directory / f"input_{counter:06d}.wav"
         write_wav(path, pcm)
@@ -197,6 +211,7 @@ class OfficialRealtimeExperiment(LiveDuplexExperiment):
         if event is not None:
             context = event.injection_text(600)
             payload["tool_context"] = context.encode("utf-8")[:640].decode("utf-8", "ignore")
+            self._injected[counter] = event.event_id
         self._log("native_audio_send_started", unit=counter, audio_file=str(path),
                   microphone=microphone, tool_event_id=event.event_id if event else None)
         try:
@@ -204,13 +219,13 @@ class OfficialRealtimeExperiment(LiveDuplexExperiment):
                 await self._ws.send(json.dumps({"type": "input.append", "input": payload}))
         except Exception:
             if event is not None:
+                self._injected.pop(counter, None)
                 self.router.controller.release_injection(event.event_id, reason="websocket_send_failed")
             raise
         if microphone:
             self._prefilled_samples += actual_samples
         if event is not None:
             self.router.controller.commit_injection(event.event_id, counter=counter)
-            self._injected[counter] = event.event_id
             self._awaiting_post_result = True
             self._post_result_text = ""
         self._log("native_audio_sent", unit=counter, tool_event_id=event.event_id if event else None)
@@ -223,18 +238,28 @@ class OfficialRealtimeExperiment(LiveDuplexExperiment):
         try:
             async for raw in self._ws:
                 event = json.loads(raw)
+                self._last_native_event_ns = time.monotonic_ns()
                 kind = event.get("kind")
                 response_id = str(event.get("response_id") or "")
+                response_unit = native_response_unit(response_id)
+                if response_unit is not None:
+                    self._last_native_response_unit = max(
+                        self._last_native_response_unit, response_unit)
                 logged = {key: value for key, value in event.items() if key not in {"audio", "audio_data"}}
                 self._log("native_event", event=logged)
                 if event.get("type") == "tool_context.evaluated":
-                    unit = int(event.get("unit", -1))
-                    event_id = self._injected.get(unit)
+                    backend_unit = int(event.get("unit", -1))
+                    client_unit = client_unit_for_tool_ack(backend_unit)
+                    event_id = self._injected.get(client_unit)
                     if event_id and event.get("ok"):
                         self._acknowledged.add(event_id)
-                        self._log("context_evaluated", unit=unit, event_id=event_id)
+                        self._log("context_evaluated", client_unit=client_unit,
+                                  backend_unit=backend_unit, event_id=event_id)
                     elif event_id:
-                        self._error = f"Native tool context evaluation failed at unit {unit}"
+                        self._error = f"Native tool context evaluation failed at unit {backend_unit}"
+                    else:
+                        self._log("unmatched_context_ack", backend_unit=backend_unit,
+                                  client_unit=client_unit)
                 if event.get("type") == "response.output.delta":
                     if kind == "text":
                         fragment = str(event.get("text") or "")
@@ -250,15 +275,12 @@ class OfficialRealtimeExperiment(LiveDuplexExperiment):
                         self._playback.put(destination)
                         self._log("speech_chunk_ready", audio_file=str(destination),
                                   duration_s=round(len(samples) / 24000, 3), response_id=response_id)
-                    elif kind == "listen" and response_id:
-                        self._completed_response_ids.add(response_id)
                 if event.get("type") == "response.done" and response_id:
-                    self._completed_response_ids.add(response_id)
                     if self._awaiting_post_result and self._post_result_text:
                         self._awaiting_post_result = False
                 self._max_native_pending_units = max(
                     self._max_native_pending_units,
-                    self._sent_units - len(self._completed_response_ids),
+                    self._sent_units - self._last_native_response_unit,
                 )
                 if event.get("type") == "session.closed":
                     self._closed_event.set()
@@ -293,9 +315,12 @@ class OfficialRealtimeExperiment(LiveDuplexExperiment):
                 try:
                     await asyncio.wait_for(self._wait_native_drain(), timeout=45)
                 except asyncio.TimeoutError:
-                    self._error = "Native responses did not drain within 45 seconds"
+                    missing = sorted(set(self._injected.values()) - self._acknowledged)
+                    self._error = ("Native final input or tool acknowledgement was not observed "
+                                   f"within 45 seconds: sent={self._sent_units}, "
+                                   f"last_response_unit={self._last_native_response_unit}, "
+                                   f"missing_tool_acks={len(missing)}")
             if not self._closed_event.is_set():
-                await asyncio.sleep(1.0)  # Allow delayed audio deltas to arrive.
                 async with self._send_lock:
                     await self._ws.send(json.dumps({"type": "session.close", "reason": "user_stop"}))
                 try:
@@ -317,6 +342,7 @@ class OfficialRealtimeExperiment(LiveDuplexExperiment):
                        "finished_at": utc_now(), "received_audio_s": round(self._received_samples / 16000, 3),
                        "max_input_backlog_s": round(self._max_backlog_s, 3),
                        "max_native_pending_units": self._max_native_pending_units,
+                       "last_native_response_unit": self._last_native_response_unit,
                        "server_estimated_capture_during_output_s": round(self._estimated_overlap_s, 3),
                        "utterance_count": self._utterances, "committed_transcripts": self._transcripts,
                        "caller_actions": self._actions, "assistant_text": "".join(self._assistant_text),
@@ -341,7 +367,12 @@ class OfficialRealtimeExperiment(LiveDuplexExperiment):
                 await self._ws.close()
 
     async def _wait_native_drain(self) -> None:
-        while self._sent_units > len(self._completed_response_ids):
+        while True:
             if self._closed_event.is_set():
                 raise RuntimeError("Native session closed before all input units were processed")
+            responses_seen = self._last_native_response_unit >= self._sent_units
+            tools_evaluated = set(self._injected.values()) <= self._acknowledged
+            quiet_s = (time.monotonic_ns() - self._last_native_event_ns) / 1e9
+            if responses_seen and tools_evaluated and quiet_s >= 2.0:
+                return
             await asyncio.sleep(0.1)

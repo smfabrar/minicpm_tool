@@ -229,8 +229,6 @@ class LiveDuplexExperiment:
         self._post_result_text = ""
         self._tts_seen = {path: (path.stat().st_mtime_ns, path.stat().st_size)
                           for path in self.output_root.rglob("wav_*.wav")}
-        self._silence_path = self.directory / "one_second_silence.wav"
-        write_wav(self._silence_path, bytes(16000 * 2), 16000)
         settings = {"session_id": self.id, "started_at": utc_now(),
                     "input_unit_s": 1.0, "transport_chunk_target_s": 0.5,
                     "vad_rms": self.vad_rms, "vad_pause_s": self.vad_pause_s,
@@ -489,12 +487,14 @@ class LiveDuplexExperiment:
     def next_playback(self, session_id: str, timeout_s: float = 1.0) -> Path | None:
         if session_id != self._state.get("session_id"):
             return None
-        try:
-            path = self._playback.get(timeout=timeout_s)
-        except queue.Empty:
-            with self._state_lock:
-                finished = self._state.get("status") in {"complete", "failed"}
-            return None if finished else self._silence_path
+        while True:
+            try:
+                path = self._playback.get(timeout=timeout_s)
+                break
+            except queue.Empty:
+                with self._state_lock:
+                    if self._state.get("status") in {"complete", "failed"}:
+                        return None
         self._loop.call_soon_threadsafe(self._mark_sent, path)
         return path
 
@@ -625,7 +625,7 @@ def make_live_gradio_ui(experiment: LiveDuplexExperiment | RestartableLiveExperi
             path = experiment.next_playback(session_id)
             if path is None:
                 return
-            yield str(path)
+            yield path.read_bytes()
 
     def poll():
         snapshot = experiment.snapshot()

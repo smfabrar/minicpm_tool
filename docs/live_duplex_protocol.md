@@ -27,13 +27,15 @@ flowchart LR
 
 The official audio protocol accepts repeated `input.append` audio and returns `listen`, `text`, and `audio` deltas. It does not define a way to deliver an external tool result into an already running audio session. Our pinned extension, [`fixtures/realtime-tool-context.patch`](../fixtures/realtime-tool-context.patch), adds a bounded `input.tool_context` string. The gateway and worker pass it unchanged; the C++ backend checks its type and length, evaluates it before the next unit's audio embeddings, and sends `tool_context.evaluated` with the unit number and success flag. This event means the C++ model call completed with that text. It is not evidence that the model used the fact correctly in speech.
 
-Only the C++ backend is patched. The official gateway and worker are checked out at `47709a9210dfd71afa76c058e017fc8c4db5c8d2`; the official C++ backend is checked out at `873056743b74e1a4ce5dcf7290e2298428e214db`. The adapter tag is `v0.1.23`. The notebook records these revisions and the extension hash in `run_manifest.json`. Granite is loaded from a local Hugging Face snapshot so a missing optional `additional_chat_templates` directory cannot stop tokenizer initialization.
+Only the C++ backend is patched. The official gateway and worker are checked out at `47709a9210dfd71afa76c058e017fc8c4db5c8d2`; the official C++ backend is checked out at `873056743b74e1a4ce5dcf7290e2298428e214db`. The adapter tag is `v0.1.24`. The notebook records these revisions and the extension hash in `run_manifest.json`. Granite is loaded from a local Hugging Face snapshot so a missing optional `additional_chat_templates` directory cannot stop tokenizer initialization.
 
 ## What happens during a correction
 
 The person says “Where is the robotics seminar?” A pause commits that utterance to Whisper and Granite. Granite requests `room_lookup` and the controller starts version 1. Before the deliberately delayed result arrives, the person says “Actually, the vision seminar.” Granite should amend the pending request to version 2. The controller rejects a late version 1 result. At the next one-second MiniCPM audio boundary, only the current C314 fact may enter `tool_context`. The backend acknowledges that evaluation, then the person judges the spoken answer. The five-second room delay is a fixed experiment condition, not the lookup's normal speed.
 
 The microphone keeps recording while native speech deltas are offered to the browser. The adapter measures input backlog and estimates capture during outbound audio. Browser playback lacks a completion receipt, so the participant also records whether MiniCPM was actually audible while they spoke.
+
+The first exported live trial is analyzed in [live_trial_20260928.md](live_trial_20260928.md). It exposed two adapter bookkeeping errors and an avoidable playback gap. The notebook now sends real WAV bytes to Gradio without injecting a second of silence whenever MiniCPM has not produced the next chunk. The saved `speaker_combined.wav` joins native chunks for comparison, and cell 13 prints a reproducible timing report. MiniCPM itself sometimes produced one second of speech more than one second after the prior chunk; the adapter cannot remove those source gaps without adding playback delay. The official audio protocol does not promise a `response.done` for each input unit, so finalization uses the pinned backend's numbered response IDs and the tool acknowledgement instead.
 
 ## Kaggle sequence
 
@@ -63,4 +65,4 @@ Each run is in `/kaggle/working/duplex_voice_runs/<run_id>/`, with each conversa
 
 A successful *tool mechanism* requires a current versioned result, a `native_audio_sent` event with that result's ID, and `tool_context.evaluated` for the same unit. A successful *spoken answer* additionally requires that the assistant's later speech uses the current fact and that the human confirms hearing it. Tool selection alone is not a successful outcome.
 
-This notebook is prepared and locally syntax-checked. The C++ CUDA build, official live service chain, Gradio tunnel, and human speech trial still need execution on Kaggle; the repo does not claim a measured live result yet.
+The revised Python adapter and notebook are locally checked. Its playback behavior and spoken answers still require a new Kaggle human trial. The prior run remains a failed quality trial even though its tool evaluation was confirmed in backend logs.

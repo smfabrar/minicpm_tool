@@ -1,18 +1,22 @@
 import asyncio
 import json
 import tempfile
+import threading
+import time
 import unittest
 from array import array
+from collections import deque
 from datetime import datetime, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from unittest.mock import patch
 
 from duplex_tools.caller import ChoiceScores, GraniteToolCaller
 from duplex_tools.contracts import CallerAction, TranscriptSegment
 from duplex_tools.controller import ContextController
 from duplex_tools.conversation import ConversationRouter
-from duplex_tools.live_duplex import LiveDuplexExperiment, RestartableLiveExperiment, SpeechSegmenter
+from duplex_tools.live_duplex import LiveDuplexExperiment, RestartableLiveExperiment, SpeechSegmenter, write_wav
+from duplex_tools.official_realtime import OfficialRealtimeExperiment, client_unit_for_tool_ack, native_response_unit
 from duplex_tools.tools import RoomLookup
 
 
@@ -69,6 +73,87 @@ class RestartTests(unittest.TestCase):
         self.assertEqual(len(created), 2)
         manager.close()
         self.assertTrue(all(trial.closed for trial in created))
+
+
+class NativeProtocolTests(unittest.TestCase):
+    def test_pinned_backend_unit_numbering_matches_exported_session(self):
+        self.assertEqual(client_unit_for_tool_ack(19), 18)
+        self.assertEqual(client_unit_for_tool_ack(192), 191)
+        self.assertEqual(native_response_unit("session_resp_203"), 203)
+        self.assertIsNone(native_response_unit("unexpected-format"))
+
+    def test_playback_waits_for_real_speech_without_inserting_silence(self):
+        with tempfile.TemporaryDirectory() as directory:
+            experiment = LiveDuplexExperiment(None, None, None, Path(directory))
+            experiment._state = {"session_id": "trial", "status": "running"}
+            experiment.directory = Path(directory)
+            experiment._outbound_windows = deque()
+            speech = experiment.directory / "speech.wav"
+            write_wav(speech, pcm(4000, 0.2))
+            result = []
+            thread = threading.Thread(target=lambda: result.append(
+                experiment.next_playback("trial", timeout_s=0.01)))
+            try:
+                thread.start()
+                time.sleep(0.05)
+                self.assertTrue(thread.is_alive())
+                experiment._playback.put(speech)
+                thread.join(timeout=1)
+                self.assertEqual(result, [speech])
+            finally:
+                experiment.close()
+
+
+class NativeDrainTests(unittest.IsolatedAsyncioTestCase):
+    async def test_backend_ack_events_match_client_tool_results(self):
+        class FakeSocket:
+            def __aiter__(self):
+                self.events = iter([
+                    {"type": "tool_context.evaluated", "unit": 19, "ok": True},
+                    {"type": "tool_context.evaluated", "unit": 192, "ok": True},
+                    {"type": "response.output.delta", "kind": "listen",
+                     "response_id": "session_resp_203"},
+                    {"type": "session.closed"},
+                ])
+                return self
+
+            async def __anext__(self):
+                try:
+                    return json.dumps(next(self.events))
+                except StopIteration:
+                    raise StopAsyncIteration
+
+        class Receiver:
+            _ws = FakeSocket()
+            _injected = {18: "room", 191: "calculator"}
+            _acknowledged = set()
+            _last_native_response_unit = 0
+            _max_native_pending_units = 0
+            _sent_units = 203
+            _error = None
+            _closed_event = asyncio.Event()
+            records = []
+
+            def _log(self, kind, **fields):
+                self.records.append((kind, fields))
+
+        receiver = Receiver()
+        with patch.dict("sys.modules", {"numpy": ModuleType("numpy")}):
+            await OfficialRealtimeExperiment._read_realtime(receiver)
+        self.assertEqual(receiver._acknowledged, {"room", "calculator"})
+        self.assertEqual(receiver._last_native_response_unit, 203)
+        self.assertEqual(len([kind for kind, _ in receiver.records
+                              if kind == "context_evaluated"]), 2)
+
+    async def test_final_unit_and_tool_ack_finish_without_response_done_per_unit(self):
+        experiment = object.__new__(OfficialRealtimeExperiment)
+        experiment._sent_units = 203
+        experiment._last_native_response_unit = 203
+        experiment._injected = {18: "room", 191: "calculator"}
+        experiment._acknowledged = {"room", "calculator"}
+        experiment._last_native_event_ns = time.monotonic_ns() - 3_000_000_000
+        experiment._closed_event = asyncio.Event()
+        await asyncio.wait_for(experiment._wait_native_drain(), timeout=0.5)
 
 
 class AmendmentTests(unittest.IsolatedAsyncioTestCase):
