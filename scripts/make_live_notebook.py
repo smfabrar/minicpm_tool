@@ -34,7 +34,7 @@ Official protocol: [audio Realtime API](https://github.com/OpenBMB/MiniCPM-o-Dem
 """)
 
 code("""# 1 — Select a tested adapter release. Run again after a Kaggle kernel restart.
-SOURCE_REF = 'v0.1.20'
+SOURCE_REF = 'v0.1.21'
 DEMO_PIN = '47709a9210dfd71afa76c058e017fc8c4db5c8d2'
 OMNI_PIN = '873056743b74e1a4ce5dcf7290e2298428e214db'
 print('Adapter:', SOURCE_REF, 'Demo:', DEMO_PIN[:12], 'C++:', OMNI_PIN[:12])
@@ -313,7 +313,7 @@ print('Run output:', OUTPUT)
 
 md("""## Speak, inspect, and save
 
-1. Press **Start live session** once. The native model stays loaded and the microphone stays open.
+1. Press **Start live session** once. Initialization runs in the background, so the share page stays responsive. When status says **running**, press **Begin microphone when ready**. Keep it open while you speak and while MiniCPM answers.
 2. Say “Where is the robotics seminar?” Then, before the delayed lookup returns, say “Actually, the vision seminar.” The current answer should name **C314**, not B742. Check the tool trace and listen to the spoken answer.
 3. While MiniCPM is talking, ask “What is 17 times 23?” This checks whether capture continues during output. If there is no audible overlap, record that honestly.
 4. Press **Stop and finish**. Wait for `complete` or `failed`. Record the exact words heard and whether you spoke during the assistant's audio. The tool extension reports `tool_context.evaluated`; an ACK shows evaluation finished, while the spoken verdict tells us whether the answer was useful.

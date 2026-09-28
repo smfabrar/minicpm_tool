@@ -546,7 +546,15 @@ def make_live_gradio_ui(experiment: LiveDuplexExperiment):
 
     def start():
         session_id = experiment.start()
-        return session_id, gr.Audio(recording=True), "Recording and processing live audio."
+        ready = experiment.snapshot().get("status") == "running" and not hasattr(experiment, "_connection_future")
+        message = ("Recording and processing live audio." if ready else
+                   "Connecting to MiniCPM. Wait for status running, then press Begin microphone.")
+        return session_id, gr.Audio(recording=ready), message
+
+    def begin_microphone():
+        if experiment.snapshot().get("status") != "running":
+            return gr.skip(), "MiniCPM is still connecting. Wait for status running."
+        return gr.Audio(recording=True), "Recording and processing live audio."
 
     def receive(audio, session_id):
         return experiment.receive(session_id, audio)
@@ -569,13 +577,14 @@ def make_live_gradio_ui(experiment: LiveDuplexExperiment):
                 json.dumps(snapshot, indent=2))
 
     with gr.Blocks(title="Live duplex tool experiment") as app:
-        gr.Markdown("# Live MiniCPM tool experiment\nStart once, speak naturally, and keep the microphone open while MiniCPM speaks. Try correcting a room request while its lookup is running. Use headphones to keep speaker audio out of the microphone. Stop and save your listening verdict before exporting the run.")
+        gr.Markdown("# Live MiniCPM tool experiment\nStart the session once. When status says **running**, press **Begin microphone** and keep it open while MiniCPM speaks. Try correcting a room request while its lookup is running. Use headphones to keep speaker audio out of the microphone. Stop and save your listening verdict before exporting the run.")
         session_id = gr.State("")
         with gr.Row():
             microphone = gr.Audio(sources=["microphone"], type="numpy", streaming=True,
                                   label="Live microphone")
             speaker = gr.Audio(streaming=True, autoplay=True, label="MiniCPM live speech")
         start_button = gr.Button("Start live session", variant="primary")
+        record_button = gr.Button("Begin microphone when ready")
         stop_button = gr.Button("Stop and finish")
         ingest_status = gr.Textbox(label="Microphone status", interactive=False)
         status = gr.Textbox(label="Session status", value="ready", interactive=False)
@@ -588,6 +597,8 @@ def make_live_gradio_ui(experiment: LiveDuplexExperiment):
         start_event.then(play, inputs=[session_id], outputs=[speaker],
                          concurrency_id="live_playback", concurrency_limit=1,
                          show_progress="hidden")
+        record_button.click(begin_microphone, outputs=[microphone, ingest_status],
+                            queue=False, show_progress="hidden")
         microphone.stream(receive, inputs=[microphone, session_id], outputs=[ingest_status],
                           stream_every=0.5, time_limit=3600, queue=False,
                           trigger_mode="multiple", concurrency_limit=1,

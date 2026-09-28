@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import asyncio
 import base64
+import concurrent.futures
 import json
 import time
 import uuid
@@ -46,6 +47,50 @@ class OfficialRealtimeExperiment(LiveDuplexExperiment):
         self.gateway_url = gateway_url
         self.reference_audio = Path(reference_audio)
         self.system_prompt = system_prompt
+
+    def start(self) -> str:
+        """Begin native initialization without holding a Gradio request open."""
+        if self._started:
+            raise RuntimeError("this live experiment already started; use a new initialized run")
+        self._started = True
+        future = asyncio.run_coroutine_threadsafe(self._start(), self._loop)
+        self._connection_future = future
+
+        def report_failure(done: concurrent.futures.Future[str]) -> None:
+            try:
+                done.result()
+            except Exception as exc:
+                error = f"Native session initialization failed: {type(exc).__name__}: {exc}"
+                if hasattr(self, "directory"):
+                    self._log("native_initialization_failed", error=error)
+                    summary = {"session_id": self.id, "status": "failed", "error": error,
+                               "finished_at": utc_now()}
+                    (self.directory / "live_summary.json").write_text(json.dumps(summary, indent=2) + "\n")
+                    self._set_state(**summary)
+
+        future.add_done_callback(report_failure)
+        deadline = time.monotonic() + 5
+        while time.monotonic() < deadline:
+            state = self.snapshot()
+            if state.get("status") in {"connecting", "running"} and state.get("session_id"):
+                return str(state["session_id"])
+            if future.done():
+                return future.result()
+            time.sleep(0.02)
+        raise TimeoutError("Native session setup did not enter connecting state within five seconds")
+
+    def receive(self, session_id: str, audio: tuple[int, Any] | None) -> str:
+        if self.snapshot().get("status") != "running":
+            return "Wait until the native session status says running, then begin recording."
+        return super().receive(session_id, audio)
+
+    def stop(self, session_id: str | None = None) -> str:
+        status = self.snapshot().get("status")
+        if status == "connecting":
+            return "The native session is still connecting; wait for running before stopping."
+        if status == "failed":
+            return "The native session failed during setup; inspect live_summary.json."
+        return super().stop(session_id)
 
     async def _start(self) -> str:
         import websockets
@@ -124,6 +169,8 @@ class OfficialRealtimeExperiment(LiveDuplexExperiment):
                     raise RuntimeError(f"realtime initialization failed: {event}")
         except Exception:
             self._input_wav.close()
+            if hasattr(self, "_ws"):
+                await self._ws.close()
             raise
         self._model_task = asyncio.create_task(self._model_loop())
         self._route_task = asyncio.create_task(self._route_loop())
