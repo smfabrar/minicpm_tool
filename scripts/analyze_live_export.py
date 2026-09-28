@@ -17,6 +17,10 @@ def analyze(session_dir: Path) -> dict:
     injections = [event for event in events if event["kind"] == "native_audio_sent"
                   and event.get("tool_event_id")]
     acks = [event for event in native if event.get("type") == "tool_context.evaluated"]
+    microphone = [event for event in events if event["kind"] == "microphone_chunk"]
+    microphone_wall_s = ((microphone[-1]["monotonic_ns"] - microphone[0]["monotonic_ns"]) / 1e9 + 0.5
+                         if microphone else None)
+    microphone_media_s = sum(event["samples"] for event in microphone) / 16000
 
     nearby_gaps = []
     for earlier, later in zip(ready, ready[1:]):
@@ -35,6 +39,10 @@ def analyze(session_dir: Path) -> dict:
         "status": summary.get("status"),
         "error": summary.get("error"),
         "microphone_audio_s": summary.get("received_audio_s"),
+        "microphone_callback_wall_s": (round(microphone_wall_s, 3)
+                                       if microphone_wall_s is not None else None),
+        "microphone_realtime_pace": (round(microphone_media_s / microphone_wall_s, 3)
+                                     if microphone_wall_s else None),
         "native_input_units": sum(event["kind"] == "native_audio_sent" for event in events),
         "native_response_ids_seen": len({event.get("response_id") for event in native
                                          if event.get("response_id")}),

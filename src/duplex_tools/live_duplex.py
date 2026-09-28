@@ -682,24 +682,43 @@ def make_transport_smoke_ui(directory: Path):
 
     directory = Path(directory)
     directory.mkdir(parents=True, exist_ok=True)
-    silence = directory / "silence.wav"
-    write_wav(silence, bytes(32000))
     playback: queue.Queue[Path] = queue.Queue()
     running = threading.Event()
     buffer = bytearray()
     guard = threading.Lock()
     counter = 0
+    first_chunk_ns: int | None = None
+    last_chunk_ns: int | None = None
+    received_samples = 0
 
     def start():
+        nonlocal first_chunk_ns, last_chunk_ns, received_samples, counter
+        (directory / "capture_pacing.json").unlink(missing_ok=True)
+        while not playback.empty():
+            try:
+                playback.get_nowait()
+            except queue.Empty:
+                break
+        with guard:
+            first_chunk_ns = None
+            last_chunk_ns = None
+            received_samples = 0
+            counter = 0
+            buffer.clear()
         running.set()
-        return gr.Audio(recording=True), "Recording. You should hear your speech returned while recording stays on."
+        return "Click the record control inside the microphone panel for at least 15 seconds."
 
     def receive(audio):
-        nonlocal counter
+        nonlocal counter, first_chunk_ns, last_chunk_ns, received_samples
         if audio is None or not running.is_set():
             return "Waiting for microphone."
         pcm = microphone_pcm(audio)
+        now_ns = time.monotonic_ns()
         with guard:
+            if first_chunk_ns is None:
+                first_chunk_ns = now_ns
+            last_chunk_ns = now_ns
+            received_samples += len(pcm) // 2
             buffer.extend(pcm)
             while len(buffer) >= 32000:
                 counter += 1
@@ -707,22 +726,40 @@ def make_transport_smoke_ui(directory: Path):
                 write_wav(path, bytes(buffer[:32000]))
                 del buffer[:32000]
                 playback.put(path)
-        return f"Received {len(pcm) // 2 / 16000:.2f}s microphone audio."
+            wall_s = (last_chunk_ns - first_chunk_ns) / 1e9 + 0.5
+            media_s = received_samples / 16000
+        return (f"Received {media_s:.1f}s audio in {wall_s:.1f}s wall time "
+                f"({media_s / wall_s:.0%} of real-time pace).")
 
     def play():
-        while running.is_set():
+        while running.is_set() or not playback.empty():
             try:
-                path = playback.get(timeout=1.0)
+                path = playback.get(timeout=0.25)
             except queue.Empty:
-                path = silence
-            yield str(path)
+                continue
+            yield path.read_bytes()
 
     def stop():
         running.clear()
-        return gr.Audio(recording=False), "Stopped. If echo played without stopping capture, the browser transport worked."
+        with guard:
+            if first_chunk_ns is None or last_chunk_ns is None:
+                return "No microphone chunks arrived."
+            wall_s = (last_chunk_ns - first_chunk_ns) / 1e9 + 0.5
+            media_s = received_samples / 16000
+            pace = media_s / wall_s
+        report = {"media_s": round(media_s, 3), "wall_s": round(wall_s, 3),
+                  "realtime_pace": round(pace, 3), "at": utc_now()}
+        (directory / "capture_pacing.json").write_text(json.dumps(report, indent=2) + "\n")
+        if media_s < 10:
+            verdict = "Record at least 10 seconds to judge pace."
+        elif pace < 0.9:
+            verdict = "Below 90%: fix browser transport before a GPU trial."
+        else:
+            verdict = "Pacing check passed."
+        return f"Stopped. Capture pace: {pace:.0%}. {verdict}"
 
     with gr.Blocks(title="Live audio transport check") as app:
-        gr.Markdown("# CPU-only live audio check\nUse headphones. Start once, speak for several seconds, and confirm that audio plays back while the microphone is still recording. This tests the browser transport before loading models or using GPU time.")
+        gr.Markdown("# CPU-only live audio check\nUse headphones. Press Start, then use the microphone panel's own record control for at least 15 seconds. Check both the echo and the reported capture pace before using GPU time.")
         with gr.Row():
             mic = gr.Audio(sources=["microphone"], type="numpy", streaming=True,
                            label="Live microphone")
@@ -730,12 +767,11 @@ def make_transport_smoke_ui(directory: Path):
         status = gr.Textbox(label="Status", value="Ready")
         received = gr.Textbox(label="Chunk receipt")
         start_event = gr.Button("Start transport check", variant="primary").click(
-            start, outputs=[mic, status], queue=False)
+            start, outputs=[status], queue=False)
         start_event.then(play, outputs=[speaker], concurrency_id="smoke_playback",
                          concurrency_limit=1, show_progress="hidden")
         mic.stream(receive, inputs=[mic], outputs=[received], stream_every=0.5,
                    time_limit=120, queue=False, trigger_mode="multiple",
                    concurrency_limit=1, show_progress="hidden")
-        gr.Button("Stop").click(stop, outputs=[mic, status], queue=False)
-        mic.stop_recording(stop, outputs=[mic, status], queue=False)
+        mic.stop_recording(stop, outputs=[status], queue=False)
     return app

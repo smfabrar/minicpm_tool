@@ -27,7 +27,7 @@ flowchart LR
 
 The official audio protocol accepts repeated `input.append` audio and returns `listen`, `text`, and `audio` deltas. It does not define a way to deliver an external tool result into an already running audio session. Our pinned extension, [`fixtures/realtime-tool-context.patch`](../fixtures/realtime-tool-context.patch), adds a bounded `input.tool_context` string. The gateway and worker pass it unchanged; the C++ backend checks its type and length, evaluates it before the next unit's audio embeddings, and sends `tool_context.evaluated` with the unit number and success flag. This event means the C++ model call completed with that text. It is not evidence that the model used the fact correctly in speech.
 
-Only the C++ backend is patched. The official gateway and worker are checked out at `47709a9210dfd71afa76c058e017fc8c4db5c8d2`; the official C++ backend is checked out at `873056743b74e1a4ce5dcf7290e2298428e214db`. The adapter tag is `v0.1.24`. The notebook records these revisions and the extension hash in `run_manifest.json`. Granite is loaded from a local Hugging Face snapshot so a missing optional `additional_chat_templates` directory cannot stop tokenizer initialization.
+Only the C++ backend is patched. The official gateway and worker are checked out at `47709a9210dfd71afa76c058e017fc8c4db5c8d2`; the official C++ backend is checked out at `873056743b74e1a4ce5dcf7290e2298428e214db`. The adapter tag is `v0.1.25`. The notebook records these revisions and the extension hash in `run_manifest.json`. Granite is loaded from a local Hugging Face snapshot so a missing optional `additional_chat_templates` directory cannot stop tokenizer initialization.
 
 ## What happens during a correction
 
@@ -39,13 +39,13 @@ The first exported live trial is analyzed in [live_trial_20260928.md](live_trial
 
 ## Kaggle sequence
 
-1. Run the adapter install and code checks without GPU. Run the CPU echo page and confirm that microphone capture and playback work through the Kaggle share link. Close the echo page.
+1. Run the adapter install and code checks without GPU. Run the CPU echo page for at least 15 seconds. Confirm that microphone capture and playback work through the Kaggle share link and that the reported media-to-wall-time pace is at least 90%. Close the echo page. A slower path cannot establish a real-time result and needs another transport before GPU testing.
 2. Enable T4 GPU. Kaggle may restart Python; rerun the adapter install. Attach the GGUF model dataset and a verified saved runtime bundle if available. The first C++ build requires CUDA tools and may run during a GPU session even though compilation itself uses CPU. Save `/kaggle/working/minicpm_official_runtime_sm75` as notebook output; attach it next time to skip recompilation.
 3. Start the official backend, worker, and gateway. GPU 0 holds native MiniCPM. GPU 1 holds Whisper Tiny and Granite when available. The notebook confirms each service's health and worker registration before opening the human UI.
 4. Press **Start live session**. Initialization runs in the background. After status says **running**, click the record control **inside the microphone panel**. The former Begin button was removed because it did not reliably start browser recording. You can pause the microphone and resume within the same model session. Speak the correction scenario, then ask another question while the assistant is audible. Stop the microphone in its panel, then press **Stop and finish** after listening to the final speech. A later Start creates a fresh native and tool session while keeping the loaded models and server.
 5. Save the exact words heard, the correction attempted, and whether there was audible overlap. Download the final run ZIP. A Gradio 504 can be a tunnel failure; inspect local status and logs before interpreting it as a model failure.
 
-The official realtime session has a 600-second limit. The notebook uses one continuous session within that limit. If input backlog exceeds 12 seconds, the adapter marks the run failed and retains all collected evidence rather than hiding the delay.
+The official realtime session has a 600-second limit. The notebook uses one continuous session within that limit. If input backlog exceeds 12 seconds, the adapter marks the run failed and retains all collected evidence rather than hiding the delay. The backend is launched with an explicit 4096-token context because the first exported run showed its duplex sliding-window logic receiving `n_ctx=0` when this argument was omitted.
 
 ## Files and interpretation
 

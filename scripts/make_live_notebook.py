@@ -34,7 +34,7 @@ Official protocol: [audio Realtime API](https://github.com/OpenBMB/MiniCPM-o-Dem
 """)
 
 code("""# 1 — Select a tested adapter release. Run again after a Kaggle kernel restart.
-SOURCE_REF = 'v0.1.24'
+SOURCE_REF = 'v0.1.25'
 DEMO_PIN = '47709a9210dfd71afa76c058e017fc8c4db5c8d2'
 OMNI_PIN = '873056743b74e1a4ce5dcf7290e2298428e214db'
 print('Adapter:', SOURCE_REF, 'Demo:', DEMO_PIN[:12], 'C++:', OMNI_PIN[:12])
@@ -68,7 +68,7 @@ subprocess.run([sys.executable, '-m', 'unittest', 'discover', '-s', str(ROOT / '
 
 md("""## CPU-only browser transport check
 
-This echo page tests Kaggle's Gradio share link, microphone stream, and speaker playback without paying for GPU time. Use headphones, speak for several seconds, and verify that sound returns while the microphone remains active. A 504 here is a transport problem; resolve it before loading models. Close the echo page before continuing.
+This echo page tests Kaggle's Gradio share link, microphone stream, and speaker playback without paying for GPU time. Use headphones and record for at least 15 seconds. It reports how much microphone audio arrived per second of wall time. A pace below 90% means this Gradio path cannot support a valid real-time trial on that browser/network session, even when GPU inference is fast. Close the echo page before continuing.
 """)
 
 code("""# 4 — CPU-only echo check. Close it in the next cell when finished.
@@ -88,7 +88,15 @@ print('Echo recordings:', SMOKE_DIR)
 """)
 
 code("""# 5 — Close the echo page. CPU preparation ends here.
+import json
 smoke_app.close()
+pace_file = SMOKE_DIR / 'capture_pacing.json'
+if not pace_file.is_file():
+    raise RuntimeError('No transport measurement. Record at least 15 seconds and stop the microphone in its panel.')
+pace = json.loads(pace_file.read_text())
+print('Microphone transport pace:', pace)
+if pace['media_s'] < 10 or pace['realtime_pace'] < 0.9:
+    raise RuntimeError('Capture pace failed: repeat the CPU check or change the audio transport before a GPU trial.')
 print('Enable T4 GPU in Kaggle Settings now. Rerun cells 1–2 after the restart.')
 """)
 
@@ -229,8 +237,9 @@ def launch(name, argv, cwd, env=None):
                                stderr=subprocess.STDOUT, start_new_session=True)
     return process, path
 
+NATIVE_CTX_SIZE = 4096  # An omitted value reached duplex sliding-window code as n_ctx=0.
 backend, backend_log = launch('minicpm_backend', [str(SERVER_BIN), '-m',
-    str(MODEL_DIR / 'MiniCPM-o-4_5-Q4_K_M.gguf'), '-ngl', '99',
+    str(MODEL_DIR / 'MiniCPM-o-4_5-Q4_K_M.gguf'), '-ngl', '99', '-c', str(NATIVE_CTX_SIZE),
     '--host', '127.0.0.1', '--port', str(BACKEND_PORT)], UPSTREAM if UPSTREAM.exists() else DEMO, SERVER_ENV)
 wait_health(backend, BACKEND_URL, backend_log)
 gateway, gateway_log = launch('official_gateway', [sys.executable, 'gateway.py',
@@ -247,6 +256,7 @@ request = urllib.request.Request(f'http://127.0.0.1:{INTERNAL_PORT}/internal/wor
 with urllib.request.urlopen(request, timeout=10) as response:
     assert response.status == 200, response.read()
 manifest = {'run_id': RUN_ID, 'started_at': datetime.now(timezone.utc).isoformat(),
+            'native_context_size': NATIVE_CTX_SIZE,
     'adapter_tag': SOURCE_REF, 'adapter_commit': subprocess.check_output(
         ['git', '-C', str(ROOT), 'rev-parse', 'HEAD'], text=True).strip(),
     'official_demo_commit': DEMO_PIN, 'official_cpp_commit': OMNI_PIN,
