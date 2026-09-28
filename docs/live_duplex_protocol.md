@@ -27,7 +27,7 @@ flowchart LR
 
 The official audio protocol accepts repeated `input.append` audio and returns `listen`, `text`, and `audio` deltas. It does not define a way to deliver an external tool result into an already running audio session. Our pinned extension, [`fixtures/realtime-tool-context.patch`](../fixtures/realtime-tool-context.patch), adds a bounded `input.tool_context` string. The gateway and worker pass it unchanged; the C++ backend checks its type and length, evaluates it before the next unit's audio embeddings, and sends `tool_context.evaluated` with the unit number and success flag. This event means the C++ model call completed with that text. It is not evidence that the model used the fact correctly in speech.
 
-Only the C++ backend is patched. The official gateway and worker are checked out at `47709a9210dfd71afa76c058e017fc8c4db5c8d2`; the official C++ backend is checked out at `873056743b74e1a4ce5dcf7290e2298428e214db`. The adapter tag is `v0.1.21`. The notebook records these revisions and the extension hash in `run_manifest.json`.
+Only the C++ backend is patched. The official gateway and worker are checked out at `47709a9210dfd71afa76c058e017fc8c4db5c8d2`; the official C++ backend is checked out at `873056743b74e1a4ce5dcf7290e2298428e214db`. The adapter tag is `v0.1.22`. The notebook records these revisions and the extension hash in `run_manifest.json`. Granite is loaded from a local Hugging Face snapshot so a missing optional `additional_chat_templates` directory cannot stop tokenizer initialization.
 
 ## What happens during a correction
 

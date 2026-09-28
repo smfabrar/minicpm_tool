@@ -179,11 +179,23 @@ class TransformersGraniteGenerator:
 
     def __init__(self, model_id: str = "ibm-granite/granite-4.0-350m", device: str = "cpu") -> None:
         import torch
+        from pathlib import Path
+        from huggingface_hub import snapshot_download
         from transformers import AutoModelForCausalLM, AutoTokenizer
 
         self.torch = torch
-        self.tokenizer = AutoTokenizer.from_pretrained(model_id)
-        self.model = AutoModelForCausalLM.from_pretrained(model_id)
+        # Some Transformers / huggingface_hub combinations fail when probing the
+        # optional, absent additional_chat_templates/ directory of a remote repo.
+        # Resolve the actual files once, then load both components from that
+        # local snapshot. Hub's cache reuses already downloaded weights.
+        source = model_id if Path(model_id).is_dir() else snapshot_download(
+            repo_id=model_id,
+            allow_patterns=["*.json", "*.jinja", "*.txt", "*.safetensors"],
+        )
+        self.model_source = str(source)
+        self.model_revision = Path(source).name
+        self.tokenizer = AutoTokenizer.from_pretrained(source, local_files_only=True)
+        self.model = AutoModelForCausalLM.from_pretrained(source, local_files_only=True)
         if str(device).startswith("cuda"):
             self.model = self.model.to(device=device, dtype=torch.float16)
         else:

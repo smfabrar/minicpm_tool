@@ -34,7 +34,7 @@ Official protocol: [audio Realtime API](https://github.com/OpenBMB/MiniCPM-o-Dem
 """)
 
 code("""# 1 — Select a tested adapter release. Run again after a Kaggle kernel restart.
-SOURCE_REF = 'v0.1.21'
+SOURCE_REF = 'v0.1.22'
 DEMO_PIN = '47709a9210dfd71afa76c058e017fc8c4db5c8d2'
 OMNI_PIN = '873056743b74e1a4ce5dcf7290e2298428e214db'
 print('Adapter:', SOURCE_REF, 'Demo:', DEMO_PIN[:12], 'C++:', OMNI_PIN[:12])
@@ -285,10 +285,15 @@ tools = {'room_lookup': delayed_room_lookup, 'calculator': SafeCalculator(),
 controller = ContextController(tools, tool_timeout_s=12,
                                log=JsonlEventLog(OUTPUT / 'controller.jsonl'))
 AUX_GPU = 1 if torch.cuda.device_count() > 1 else 0
-router = ConversationRouter(GraniteToolCaller(
-    TransformersGraniteGenerator(device=f'cuda:{AUX_GPU}')), controller)
+granite_backend = TransformersGraniteGenerator(device=f'cuda:{AUX_GPU}')
+router = ConversationRouter(GraniteToolCaller(granite_backend), controller)
 recognizer = WhisperModel('tiny.en', device='cuda', device_index=AUX_GPU,
                           compute_type='float16')
+manifest['granite_revision'] = granite_backend.model_revision
+manifest['granite_snapshot'] = granite_backend.model_source
+manifest['whisper_model'] = 'tiny.en'
+manifest['tool_sidecar_gpu'] = AUX_GPU
+(OUTPUT / 'run_manifest.json').write_text(json.dumps(manifest, indent=2) + '\\n')
 live_experiment = OfficialRealtimeExperiment(
     session=None, router=router, recognizer=recognizer, output_root=OUTPUT,
     gateway_url=f'ws://127.0.0.1:{GATEWAY_PORT}/v1/realtime?mode=audio',

@@ -1,10 +1,12 @@
 from __future__ import annotations
 
 import unittest
+import sys
+from types import ModuleType
 from datetime import datetime, timezone
-from unittest.mock import patch
+from unittest.mock import Mock, patch
 
-from duplex_tools.caller import ChoiceScores, GraniteToolCaller, parse_granite_output
+from duplex_tools.caller import ChoiceScores, GraniteToolCaller, TransformersGraniteGenerator, parse_granite_output
 from duplex_tools.contracts import CallerAction, TranscriptSegment
 from duplex_tools.controller import ContextController
 from duplex_tools.conversation import ConversationRouter
@@ -67,6 +69,28 @@ class RouterTests(unittest.IsolatedAsyncioTestCase):
 
 
 class CallerTests(unittest.TestCase):
+    def test_granite_loads_from_local_snapshot_after_hub_download(self):
+        torch = ModuleType("torch")
+        torch.float16 = "float16"
+        hub = ModuleType("huggingface_hub")
+        hub.snapshot_download = Mock(return_value="/cache/snapshots/granite-revision")
+        transformers = ModuleType("transformers")
+        tokenizer_loader = Mock(return_value=object())
+        model = Mock()
+        model.to.return_value = model
+        model_loader = Mock(return_value=model)
+        transformers.AutoTokenizer = type("AutoTokenizer", (), {"from_pretrained": tokenizer_loader})
+        transformers.AutoModelForCausalLM = type("AutoModelForCausalLM", (), {"from_pretrained": model_loader})
+        with patch.dict(sys.modules, {"torch": torch, "huggingface_hub": hub,
+                                      "transformers": transformers}):
+            generator = TransformersGraniteGenerator(device="cuda:1")
+        self.assertEqual(generator.model_revision, "granite-revision")
+        self.assertEqual(tokenizer_loader.call_args.args[0], generator.model_source)
+        self.assertTrue(tokenizer_loader.call_args.kwargs["local_files_only"])
+        self.assertEqual(model_loader.call_args.args[0], generator.model_source)
+        self.assertTrue(model_loader.call_args.kwargs["local_files_only"])
+        self.assertIn("*.safetensors", hub.snapshot_download.call_args.kwargs["allow_patterns"])
+
     def test_native_tool_call_and_non_call(self):
         call = parse_granite_output('<tool_call>{"name":"calculator","arguments":{"expression":"2+3"}}</tool_call><|end_of_text|>')
         self.assertEqual(call.tool, "calculator")
